@@ -26,7 +26,6 @@ export default class VividWallpaperExtension extends Extension {
         this.isEnabled = false;
         this.startupDelayId = 0;
         this.startupCompleteId = 0;
-        this.startupOverviewRestoreId = 0;
     }
 
     enable() {
@@ -37,22 +36,16 @@ export default class VividWallpaperExtension extends Extension {
         });
         this.windowManager = new WindowManager.WindowManager();
 
-        /**
-         * Disable startup animation (Workaround for issue #65)
+        /*
+         * Do not toggle Main.sessionMode.hasOverview here. GNOME Shell uses that
+         * flag as the runtime gate for its Super+number favorite shortcuts
+         * (_allowFavoriteShortcuts()), and dash-to-dock often shares those same
+         * accelerators. Leaving the flag false after startup makes Meta+number
+         * look registered while every switch-to-application action becomes a
+         * no-op. Deferring innerEnable() until startup-complete is enough to
+         * avoid racing Shell's initial background pass without corrupting the
+         * global session mode.
          */
-        this.old_hasOverview = Main.sessionMode.hasOverview;
-
-        if (Main.layoutManager._startingUp) {
-            Main.sessionMode.hasOverview = false;
-            this.startupOverviewRestoreId = Main.layoutManager.connect('startup-complete', () => {
-                Main.sessionMode.hasOverview = this.old_hasOverview;
-                Main.layoutManager.disconnect(this.startupOverviewRestoreId);
-                this.startupOverviewRestoreId = 0;
-            });
-            // Handle Ubuntu's method
-            if (Main.layoutManager.startInOverview)
-                Main.layoutManager.startInOverview = false;
-        }
 
         /**
          * Other overrides
@@ -85,8 +78,18 @@ export default class VividWallpaperExtension extends Extension {
     }
 
     innerEnable() {
-        this.displayHelper?.start();
+        /*
+         * Install the Shell-facing filters before the GTK helper can map any
+         * compositor windows. Dash-to-dock builds its hotkey order and running
+         * indicators from Shell.AppSystem/Shell.WindowTracker during startup;
+         * if the helper appears first, dock state can cache the implementation
+         * window as a real app window until a later user interaction refreshes
+         * it. Keep WindowManager armed before spawn as well, so the first map
+         * event is immediately minimized/lowered and positioned for cloning.
+         */
+        this.override?.enable();
         this.windowManager?.enable();
+        this.displayHelper?.start();
         /*
          * The GNOME extension is now a desktop fact producer, not a playback
          * policy owner. These observations are sent over display-v1 so the
@@ -95,7 +98,6 @@ export default class VividWallpaperExtension extends Extension {
          */
         this.autoPauseFacts = new AutoPause.AutoPause(this.displayHelper);
         this.autoPauseFacts.enable();
-        this.override.enable();
 
         this.isEnabled = true;
     }
@@ -111,16 +113,10 @@ export default class VividWallpaperExtension extends Extension {
             this.startupCompleteId = 0;
         }
 
-        if (this.startupOverviewRestoreId) {
-            Main.layoutManager.disconnect(this.startupOverviewRestoreId);
-            this.startupOverviewRestoreId = 0;
-        }
-
-        Main.sessionMode.hasOverview = this.old_hasOverview;
         this.autoPauseFacts?.disable();
         this.displayHelper?.stop();
-        this.override?.disable();
         this.windowManager?.disable();
+        this.override?.disable();
 
         this.isEnabled = false;
 

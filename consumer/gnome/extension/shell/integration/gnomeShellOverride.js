@@ -27,18 +27,23 @@ import * as Util from 'resource:///org/gnome/shell/misc/util.js';
 import * as Logger from '../logger.js';
 import * as Wallpaper from '../ui/wallpaper.js';
 
-// eslint-disable-next-line no-unused-vars
 const logger = new Logger.Logger();
 
 // Ref: https://gitlab.gnome.org/GNOME/gnome-shell/-/blob/main/js/ui/workspace.js
 const BACKGROUND_CORNER_RADIUS_PIXELS = 30;
 const isHelperWindow = window => window?.title?.startsWith(Wallpaper.TITLE_PREFIX);
 
+function appLabel(app) {
+    return app?.get_id?.() ?? app?.get_name?.() ?? '<unknown>';
+}
+
 export class GnomeShellOverride {
     constructor(extension) {
         this._extension = extension;
         this._injectionManager = new InjectionManager();
         this._wallpaperActors = new Set();
+        this._loggedHiddenHelperApps = new Set();
+        this._loggedMixedHelperApps = new Set();
     }
 
     _reloadBackgrounds() {
@@ -107,7 +112,51 @@ export class GnomeShellOverride {
          * the introspected method no longer accepts compatibility arguments.
          * User-facing Shell lists are filtered at their own integration points
          * below instead of changing this low-level global API contract.
+         *
+         * Keep AppSystem.get_running() filtering narrowly scoped to helper-only
+         * apps. Dash-to-dock and the Shell number hotkeys build their startup
+         * model from this global app list; pruning every temporary zero-window
+         * entry can leave a real app without its running indicator until another
+         * window event happens to refresh the dock.
          */
+
+        let shellAppGetWindows = null;
+        const getUnfilteredAppWindows = app => {
+            try {
+                return shellAppGetWindows
+                    ? shellAppGetWindows.call(app)
+                    : app.get_windows();
+            } catch (error) {
+                logger.debug(`failed to inspect app windows app=${appLabel(app)} error=${error}`);
+                return [];
+            }
+        };
+
+        const shouldHideRunningApp = app => {
+            const windows = getUnfilteredAppWindows(app);
+            const hasHelperWindow = windows.some(window => isHelperWindow(window));
+            if (!hasHelperWindow)
+                return false;
+
+            const hasNonHelperWindow = windows.some(window => !isHelperWindow(window));
+            if (hasNonHelperWindow) {
+                const label = appLabel(app);
+                if (!thisRef._loggedMixedHelperApps.has(label)) {
+                    thisRef._loggedMixedHelperApps.add(label);
+                    logger.warn(`helper window is associated with a real app app=${label} ` +
+                        `windows=${windows.length}`);
+                }
+                return false;
+            }
+
+            const label = appLabel(app);
+            if (!thisRef._loggedHiddenHelperApps.has(label)) {
+                thisRef._loggedHiddenHelperApps.add(label);
+                logger.debug(`hiding helper-only app from running apps app=${label} ` +
+                    `windows=${windows.length}`);
+            }
+            return true;
+        };
 
         this._injectionManager.overrideMethod(
             Workspace.Workspace.prototype,
@@ -140,10 +189,23 @@ export class GnomeShellOverride {
         );
 
         this._injectionManager.overrideMethod(
+            Shell.WindowTracker.prototype,
+            'get_window_app',
+            originalMethod => function (window) {
+                return isHelperWindow(window)
+                    ? null
+                    : originalMethod.apply(this, [window]);
+            }
+        );
+
+        this._injectionManager.overrideMethod(
             Shell.App.prototype,
             'get_windows',
-            originalMethod => function () {
-                return originalMethod.call(this).filter(window => !isHelperWindow(window));
+            originalMethod => {
+                shellAppGetWindows = originalMethod;
+                return function () {
+                    return originalMethod.call(this).filter(window => !isHelperWindow(window));
+                };
             }
         );
 
@@ -159,7 +221,7 @@ export class GnomeShellOverride {
             Shell.AppSystem.prototype,
             'get_running',
             originalMethod => function () {
-                return originalMethod.call(this).filter(app => app.get_n_windows() > 0);
+                return originalMethod.call(this).filter(app => !shouldHideRunningApp(app));
             }
         );
 
