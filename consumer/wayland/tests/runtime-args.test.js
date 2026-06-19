@@ -73,12 +73,12 @@ function testInputDisabledByDefault() {
     assertEqual(options.pointerEventsEnabled, false, 'pointer events default');
 }
 
-function testPointerFeatureAdvertisementEnabled() {
-    const options = RuntimeArgs.parseRuntimeArgs(['--enable-pointer-events'], {
-        runtimeDir: '/run/user/1000',
-    });
-
-    assertEqual(options.pointerEventsEnabled, true, 'pointer events enabled');
+function testPointerFeatureAdvertisementIsRejectedUntilForwardingExists() {
+    assertThrows(
+        () => RuntimeArgs.parseRuntimeArgs(['--enable-pointer-events'], {runtimeDir: '/run/user/1000'}),
+        '--enable-pointer-events is not supported yet; pointer forwarding is not implemented',
+        'unsupported pointer events flag',
+    );
 }
 
 function testHiddenExitAfterMsOption() {
@@ -140,7 +140,7 @@ function testUnknownArgumentFails() {
     testDefaultCompositorMode,
     testSupportedCompositorModes,
     testInputDisabledByDefault,
-    testPointerFeatureAdvertisementEnabled,
+    testPointerFeatureAdvertisementIsRejectedUntilForwardingExists,
     testHiddenExitAfterMsOption,
     testInvalidExitAfterMsFails,
     testMissingSocketPathFails,

@@ -1,6 +1,6 @@
 #!/bin/sh
 
-# Central path configuration for the generic Wayland consumer probe. Generated
+# Central path configuration for the generic Wayland consumer. Generated
 # files stay under this consumer's .build tree unless the caller overrides the
 # build root for packaging or CI.
 
@@ -10,4 +10,4 @@ VIVID_WAYLAND_ROOT_DIR="${VIVID_WAYLAND_ROOT_DIR:-${ROOT_DIR}}"
 VIVID_WAYLAND_BUILD_ROOT="${VIVID_WAYLAND_BUILD_ROOT:-${VIVID_WAYLAND_ROOT_DIR}/.build}"
 VIVID_WAYLAND_BUILD_DIR="${VIVID_WAYLAND_BUILD_DIR:-${VIVID_WAYLAND_BUILD_ROOT}}"
 VIVID_WAYLAND_INSTALL_PREFIX="${VIVID_WAYLAND_INSTALL_PREFIX:-${VIVID_WAYLAND_BUILD_ROOT}/install}"
-VIVID_WAYLAND_PROBE="${VIVID_WAYLAND_PROBE:-${VIVID_WAYLAND_BUILD_DIR}/vivid-consumer-wayland-probe}"
+VIVID_WAYLAND_CONSUMER="${VIVID_WAYLAND_CONSUMER:-${VIVID_WAYLAND_BUILD_DIR}/vivid-consumer-wayland}"

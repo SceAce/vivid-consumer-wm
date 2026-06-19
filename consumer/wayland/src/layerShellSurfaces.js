@@ -89,9 +89,7 @@ function createWallpaperSurface(monitor, options = {}) {
     LayerShell.set_exclusive_zone(window, 0);
     LayerShell.set_keyboard_mode(window, LayerShell.KeyboardMode.NONE);
 
-    if (!options.pointerEventsEnabled) {
-        setEmptyInputRegion(window, Gdk, cairoModule);
-    }
+    setEmptyInputRegion(window, Gdk, cairoModule);
 
     window.present();
 
@@ -106,8 +104,15 @@ function createWallpaperSurfaces(monitors, options = {}) {
     return monitors.map(monitor => createWallpaperSurface(monitor, options));
 }
 
+function destroyWallpaperSurfaces(surfaces) {
+    for (const surface of surfaces) {
+        surface.window?.close?.();
+    }
+}
+
 var LayerShellSurfaces = {
     NAMESPACE,
     createWallpaperSurface,
     createWallpaperSurfaces,
+    destroyWallpaperSurfaces,
 };

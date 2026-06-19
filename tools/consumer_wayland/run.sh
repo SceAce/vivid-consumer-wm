@@ -17,17 +17,17 @@ usage() {
 Usage: tools/vivid.sh wayland {build|clean|run}
 
 Actions:
-  build [meson-options...]  Configure and build the Wayland layer-shell probe.
-  run [probe-args...]       Run the probe executable. Use --help for probe help.
+  build [meson-options...]  Configure and build the Wayland layer-shell consumer.
+  run [consumer-args...]    Run the consumer executable. Use --help for help.
 EOF
 }
 
-probe_usage() {
-    if [[ ! -x "${VIVID_WAYLAND_PROBE}" ]]; then
+consumer_usage() {
+    if [[ ! -x "${VIVID_WAYLAND_CONSUMER}" ]]; then
         build
     fi
 
-    "${VIVID_WAYLAND_PROBE}" --help
+    "${VIVID_WAYLAND_CONSUMER}" --help
 }
 
 configure() {
@@ -42,7 +42,7 @@ configure() {
 build() {
     configure "$@"
     ninja -C "${VIVID_WAYLAND_BUILD_DIR}"
-    chmod +x "${VIVID_WAYLAND_PROBE}"
+    chmod +x "${VIVID_WAYLAND_CONSUMER}"
 }
 
 gtk4_layer_shell_preload() {
@@ -61,7 +61,7 @@ gtk4_layer_shell_preload() {
     return 1
 }
 
-run_probe_binary() {
+run_consumer_binary() {
     local preload
     local display_consumer_dir="${VIVID_DISPLAY_CONSUMER_DIR:-${REPO_ROOT}/consumer/gnome/.build/src/display_consumer}"
 
@@ -74,29 +74,29 @@ run_probe_binary() {
 
     if [[ -n "${preload}" ]]; then
         if [[ -n "${LD_PRELOAD:-}" ]]; then
-            LD_PRELOAD="${preload}:${LD_PRELOAD}" "${VIVID_WAYLAND_PROBE}" "$@"
+            LD_PRELOAD="${preload}:${LD_PRELOAD}" "${VIVID_WAYLAND_CONSUMER}" "$@"
         else
-            LD_PRELOAD="${preload}" "${VIVID_WAYLAND_PROBE}" "$@"
+            LD_PRELOAD="${preload}" "${VIVID_WAYLAND_CONSUMER}" "$@"
         fi
         return $?
     fi
 
-    "${VIVID_WAYLAND_PROBE}" "$@"
+    "${VIVID_WAYLAND_CONSUMER}" "$@"
 }
 
-run_probe() {
+run_consumer() {
     case "${1:-}" in
         --help|-h)
-            probe_usage
+            consumer_usage
             return 0
             ;;
     esac
 
-    if [[ ! -x "${VIVID_WAYLAND_PROBE}" ]]; then
+    if [[ ! -x "${VIVID_WAYLAND_CONSUMER}" ]]; then
         build
     fi
 
-    run_probe_binary "$@"
+    run_consumer_binary "$@"
 }
 
 case "${1:-help}" in
@@ -106,7 +106,7 @@ case "${1:-help}" in
         ;;
     run)
         shift
-        run_probe "$@"
+        run_consumer "$@"
         ;;
     help|-h|--help)
         usage

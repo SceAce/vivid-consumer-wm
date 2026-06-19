@@ -6,12 +6,6 @@ function assertEqual(actual, expected, message) {
     }
 }
 
-function assertIncludes(values, expected, message) {
-    if (!values.includes(expected)) {
-        throw new Error(`${message}: expected ${JSON.stringify(values)} to include ${expected}`);
-    }
-}
-
 function assertNotIncludes(values, expected, message) {
     if (values === undefined) {
         return;
@@ -50,7 +44,7 @@ function testHelloIdentifiesWaylandConsumer() {
     ], 'hello base features');
 }
 
-function testHelloAdvertisesPointerFeatureOnlyWhenEnabled() {
+function testHelloNeverAdvertisesPointerFeatureUntilForwardingExists() {
     const disabledPayload = ProtocolPayloads.buildHelloPayload({
         pointerEventsEnabled: false,
     });
@@ -59,7 +53,7 @@ function testHelloAdvertisesPointerFeatureOnlyWhenEnabled() {
     });
 
     assertNotIncludes(disabledPayload.features, 'pointer-events-v1', 'disabled hello pointer feature');
-    assertIncludes(enabledPayload.features, 'pointer-events-v1', 'enabled hello pointer feature');
+    assertNotIncludes(enabledPayload.features, 'pointer-events-v1', 'enabled hello pointer feature');
     assertNotIncludes(enabledPayload.features, 'media-state-v1', 'hello media feature');
     assertNotIncludes(enabledPayload.features, 'audio-samples-v1', 'hello audio feature');
 }
@@ -77,7 +71,7 @@ function testConsumerCapsExcludeProtocolFeaturesAndMediaAudio() {
     assertEqual(payload.audioSamples, undefined, 'audio samples field');
 }
 
-function testPointerCapabilityRequiresRuntimeOptIn() {
+function testPointerCapabilityAlwaysFalseUntilForwardingExists() {
     const disabledPayload = ProtocolPayloads.buildConsumerCapsPayload({
         pointerEventsEnabled: false,
     });
@@ -88,7 +82,7 @@ function testPointerCapabilityRequiresRuntimeOptIn() {
     assertEqual(disabledPayload.features, undefined, 'disabled consumer caps feature list');
     assertEqual(enabledPayload.features, undefined, 'enabled consumer caps feature list');
     assertEqual(disabledPayload.pointerEvents, false, 'disabled pointer events field');
-    assertEqual(enabledPayload.pointerEvents, true, 'enabled pointer events field');
+    assertEqual(enabledPayload.pointerEvents, false, 'enabled pointer events field');
 }
 
 function testConsumerCapsExposeFutureProducerFieldsWithoutFakeDmabufCaps() {
@@ -97,7 +91,7 @@ function testConsumerCapsExposeFutureProducerFieldsWithoutFakeDmabufCaps() {
         backend: 'test-dmabuf-backend',
     };
     const payload = ProtocolPayloads.buildConsumerCapsPayload({
-        pointerEventsEnabled: true,
+        pointerEventsEnabled: false,
         renderer: 'gtk4-gdk-wayland',
         dmabufCaps,
     });
@@ -105,7 +99,7 @@ function testConsumerCapsExposeFutureProducerFieldsWithoutFakeDmabufCaps() {
     assertEqual(payload.bufferImports[0].memoryType, 'dmabuf', 'buffer import memory type');
     assertEqual(payload.bufferImports[0].renderer, 'gtk4-gdk-wayland', 'buffer import renderer');
     assertEqual(payload.explicitSync, true, 'explicit sync field');
-    assertEqual(payload.pointerEvents, true, 'pointer events field');
+    assertEqual(payload.pointerEvents, false, 'pointer events field');
     assertEqual(payload.mediaState, undefined, 'media state field');
     assertEqual(payload.audioSamples, undefined, 'audio samples field');
     assertEqual(payload.dmabufCaps, dmabufCaps, 'dmabuf caps input object');
@@ -127,9 +121,9 @@ function testOutputRegistrationUsesSameFeaturePolicy() {
 
 [
     testHelloIdentifiesWaylandConsumer,
-    testHelloAdvertisesPointerFeatureOnlyWhenEnabled,
+    testHelloNeverAdvertisesPointerFeatureUntilForwardingExists,
     testConsumerCapsExcludeProtocolFeaturesAndMediaAudio,
-    testPointerCapabilityRequiresRuntimeOptIn,
+    testPointerCapabilityAlwaysFalseUntilForwardingExists,
     testConsumerCapsExposeFutureProducerFieldsWithoutFakeDmabufCaps,
     testOutputRegistrationUsesSameFeaturePolicy,
 ].forEach(testCase => testCase());

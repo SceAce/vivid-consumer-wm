@@ -40,7 +40,7 @@ function parseRuntimeArgs(argv, options = {}) {
         } else if (arg === '--no-input') {
             parsed.pointerEventsEnabled = false;
         } else if (arg === '--enable-pointer-events') {
-            parsed.pointerEventsEnabled = true;
+            throw new Error('--enable-pointer-events is not supported yet; pointer forwarding is not implemented');
         } else if (arg === '--exit-after-ms') {
             index += 1;
             if (index >= argv.length) {

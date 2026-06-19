@@ -150,7 +150,7 @@ function testCreatesOneBackgroundSurfacePerMonitor() {
     }
 }
 
-function testFallsBackToBottomLayerWhenBackgroundEnumIsUnavailable() {
+function testFallsBackToBottomLayerAndStaysInputTransparent() {
     const Gtk = makeGtkFake();
     installGtkRegistries(Gtk);
     const LayerShell = makeLayerShellFake(false);
@@ -164,7 +164,8 @@ function testFallsBackToBottomLayerWhenBackgroundEnumIsUnavailable() {
     });
 
     assertEqual(surface.window.layerShell.layer, 'bottom', 'fallback layer');
-    assertEqual(surface.window.inputRegion, undefined, 'pointer-enabled input region');
+    assertEqual(surface.window.inputRegion.props.width, 0, 'unsupported pointer flag still empty input width');
+    assertEqual(surface.window.inputRegion.props.height, 0, 'unsupported pointer flag still empty input height');
 }
 
 function testEmptyInputRegionDoesNotForceEarlyRealizeWithoutDirectSetter() {
@@ -226,8 +227,30 @@ function testEmptyInputRegionDoesNotForceEarlyRealizeWithoutDirectSetter() {
     assertEqual(surface.window.surface.inputRegion, null, 'input region deferred or skipped until surface exists');
 }
 
+function testDestroyWallpaperSurfacesClosesWindows() {
+    const Gtk = makeGtkFake();
+    installGtkRegistries(Gtk);
+    Gtk.Window.prototype.close = function close() {
+        this.closed = true;
+    };
+    const LayerShell = makeLayerShellFake();
+    const Gdk = makeGdkFake();
+    const surfaces = LayerShellSurfaces.createWallpaperSurfaces([{id: 'monitor-0'}, {id: 'monitor-1'}], {
+        Gtk,
+        Gdk,
+        LayerShell,
+        pointerEventsEnabled: false,
+    });
+
+    LayerShellSurfaces.destroyWallpaperSurfaces(surfaces);
+
+    assertEqual(surfaces[0].window.closed, true, 'first window closed');
+    assertEqual(surfaces[1].window.closed, true, 'second window closed');
+}
+
 [
     testCreatesOneBackgroundSurfacePerMonitor,
-    testFallsBackToBottomLayerWhenBackgroundEnumIsUnavailable,
+    testFallsBackToBottomLayerAndStaysInputTransparent,
     testEmptyInputRegionDoesNotForceEarlyRealizeWithoutDirectSetter,
+    testDestroyWallpaperSurfacesClosesWindows,
 ].forEach(testCase => testCase());

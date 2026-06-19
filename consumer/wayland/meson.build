@@ -22,21 +22,21 @@ probe_config.set('gjs', gjs.full_path())
 probe_config.set('layer_shell_required', layer_shell_required)
 probe_config.set('source_dir', meson.current_source_dir() / 'src')
 
-probe = configure_file(
+consumer = configure_file(
   input: 'src/layer-shell-probe.js',
-  output: 'vivid-consumer-wayland-probe',
+  output: 'vivid-consumer-wayland',
   configuration: probe_config,
 )
 
 install_data(
-  probe,
+  consumer,
   install_dir: get_option('bindir'),
   install_mode: 'rwxr-xr-x',
 )
 
 run_target(
   'probe-help',
-  command: [gjs, probe, '--help'],
+  command: [gjs, consumer, '--help'],
 )
 
 test(
@@ -83,4 +83,19 @@ test(
   env: [
     'GJS_PATH=' + meson.current_source_dir() / 'src',
   ],
+)
+
+test(
+  'runtime-topology',
+  gjs,
+  args: files('tests/runtime-topology.test.js'),
+  env: [
+    'GJS_PATH=' + meson.current_source_dir() / 'src',
+  ],
+)
+
+test(
+  'configured-binary',
+  gjs,
+  args: [consumer, '--help'],
 )

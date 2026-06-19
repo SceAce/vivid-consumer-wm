@@ -86,8 +86,8 @@ checkout or any path that is not a `.build` directory or below one.
 
 ## Current Limitations
 
-- Pointer events are opt-in with `--enable-pointer-events`; the default
-  wallpaper surfaces set an empty input region and do not consume input.
+- Pointer forwarding is not implemented. Wallpaper surfaces always set an empty
+  input region and do not consume input; `--enable-pointer-events` is rejected.
 - Media controls are not exposed by this consumer yet.
 - Audio capture, audio forwarding, and audio-reactive integration are not
   enabled in the Wayland consumer yet.
@@ -116,7 +116,7 @@ tools/vivid.sh wayland run --compositor hyprland
 Verify that each monitor receives one `vivid-wallpaper` layer-shell surface,
 the surface stays behind normal windows, the wallpaper updates when the producer
 renders frames, and normal pointer/keyboard input continues to reach desktop
-windows unless `--enable-pointer-events` was used.
+windows.
 
 In a niri session:
 

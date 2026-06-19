@@ -12,12 +12,13 @@ const RuntimeArgs = imports.runtimeArgs;
 const OutputModel = imports.outputModel;
 const LayerShellSurfaces = imports.layerShellSurfaces;
 const DisplayConnection = imports.displayConnection;
+const RuntimeTopology = imports.runtimeTopology;
 
 const LAYER_SHELL_REQUIRED = @layer_shell_required@;
 const DISPLAY_CONSUMER_DIR = GLib.getenv('VIVID_DISPLAY_CONSUMER_DIR') || '';
 
 function printUsage() {
-    print(`Usage: vivid-consumer-wayland-probe [options] [--probe]
+    print(`Usage: vivid-consumer-wayland [options] [--probe]
 
 Options:
   --help                         Print this help and exit.
@@ -25,7 +26,7 @@ Options:
   --socket PATH                  Vivid producer socket path.
   --compositor MODE              Compositor mode: ${RuntimeArgs.SUPPORTED_COMPOSITORS.join(', ')}.
   --no-input                     Do not advertise input features.
-  --enable-pointer-events        Advertise pointer input support.
+  --enable-pointer-events        Unsupported; pointer forwarding is not implemented.
 
 Normal run connects to the Vivid display-v1 producer socket and presents frames.`);
 }
@@ -69,21 +70,6 @@ function probeLayerShell() {
 
     print('Gtk4LayerShell GI bindings imported and initialized.');
     return 0;
-}
-
-function collectMonitors(Gdk) {
-    const display = Gdk.Display.get_default();
-    if (display === null) {
-        return [];
-    }
-
-    const monitors = display.get_monitors();
-    const result = [];
-    for (let index = 0; index < monitors.get_n_items(); index += 1) {
-        result.push(monitors.get_item(index));
-    }
-
-    return result;
 }
 
 function loadDisplayConsumer() {
@@ -246,42 +232,48 @@ function runLayerShellConsumer(options) {
 
     Gtk.init();
 
-    const monitors = collectMonitors(Gdk);
-    if (monitors.length === 0) {
-        printerr('No GDK monitors are available for Wayland layer-shell surfaces.');
-        return 1;
-    }
-
-    const surfaces = LayerShellSurfaces.createWallpaperSurfaces(monitors, {
-        Gtk,
-        Gdk,
-        LayerShell,
-        pointerEventsEnabled: options.pointerEventsEnabled,
-    });
-
-    const failedSurface = surfaces.find(surface =>
-        typeof LayerShell.is_layer_window === 'function' &&
-        !LayerShell.is_layer_window(surface.window));
-    if (failedSurface !== undefined) {
-        printerr('Gtk4LayerShell did not create a layer surface for a wallpaper window.');
-        return 1;
-    }
-
-    const presenters = [];
-    for (let index = 0; index < monitors.length; index += 1) {
-        const output = OutputModel.outputRegistrationFromGdkMonitor(monitors[index], index, {
-            compositor: options.compositor,
-        });
-        print(`Prepared output registration: ${JSON.stringify(output)}`);
-        presenters.push(new DisplayConnection.WaylandOutputPresenter(surfaces[index], output, {
-            DisplayConsumer,
-        }));
-    }
-
-    print(`Created ${monitors.length} Wayland layer-shell wallpaper surface(s).`);
-
     const dmabufCaps = buildDmaBufCaps(DisplayConsumer, Gdk);
     print(`Prepared DMA-BUF caps: ${JSON.stringify(dmabufCaps)}`);
+
+    const display = Gdk.Display.get_default();
+    const topology = new RuntimeTopology.TopologyController({
+        display,
+        compositor: options.compositor,
+        createSurfaces: monitors => {
+            const surfaces = LayerShellSurfaces.createWallpaperSurfaces(monitors, {
+                Gtk,
+                Gdk,
+                LayerShell,
+                pointerEventsEnabled: false,
+            });
+            const failedSurface = surfaces.find(surface =>
+                typeof LayerShell.is_layer_window === 'function' &&
+                !LayerShell.is_layer_window(surface.window));
+            if (failedSurface !== undefined) {
+                throw new Error('Gtk4LayerShell did not create a layer surface for a wallpaper window.');
+            }
+            print(`Created ${monitors.length} Wayland layer-shell wallpaper surface(s).`);
+            return surfaces;
+        },
+        destroySurfaces: surfaces => LayerShellSurfaces.destroyWallpaperSurfaces(surfaces),
+        createPresenter: (surface, output) => {
+            print(`Prepared output registration: ${JSON.stringify(output)}`);
+            return new DisplayConnection.WaylandOutputPresenter(surface, output, {
+                DisplayConsumer,
+            });
+        },
+        outputFromMonitor: (monitor, index, outputOptions) =>
+            OutputModel.outputRegistrationFromGdkMonitor(monitor, index, outputOptions),
+        log: message => printerr(`Vivid Wayland Consumer: ${message}`),
+    });
+
+    let presenters = [];
+    try {
+        presenters = topology.buildInitial();
+    } catch (error) {
+        printerr(error.message);
+        return 1;
+    }
 
     const displayConnection = new DisplayConnection.DisplaySocketClient({
         socketPath: options.socketPath,
@@ -293,10 +285,12 @@ function runLayerShellConsumer(options) {
         log: message => printerr(`Vivid Wayland Consumer: ${message}`),
     });
     displayConnection.start();
+    topology.watch(displayConnection);
 
     const loop = new GLib.MainLoop(null, false);
     if (options.exitAfterMs !== undefined) {
         GLib.timeout_add(GLib.PRIORITY_DEFAULT, options.exitAfterMs, () => {
+            topology.stop();
             displayConnection.stop();
             loop.quit();
             return GLib.SOURCE_REMOVE;
@@ -304,6 +298,7 @@ function runLayerShellConsumer(options) {
     }
 
     loop.run();
+    topology.stop();
     displayConnection.stop();
     return 0;
 }

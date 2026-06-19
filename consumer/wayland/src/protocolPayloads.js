@@ -10,16 +10,10 @@ var BASE_CONSUMER_FEATURES = [
     'dmabuf-unbind-done-v1',
     'dmabuf-shadow-copy-v1',
 ];
-var POINTER_FEATURE = 'pointer-events-v1';
 var DEFAULT_RENDERER = 'gtk4-gdk-wayland';
 
-function consumerFeatures(options = {}) {
-    const features = [...BASE_CONSUMER_FEATURES];
-    if (options.pointerEventsEnabled) {
-        features.push(POINTER_FEATURE);
-    }
-
-    return features;
+function consumerFeatures(_options = {}) {
+    return [...BASE_CONSUMER_FEATURES];
 }
 
 function buildHelloPayload(options = {}) {
@@ -41,7 +35,7 @@ function buildConsumerCapsPayload(options = {}) {
             renderer: options.renderer || DEFAULT_RENDERER,
         }],
         explicitSync: true,
-        pointerEvents: Boolean(options.pointerEventsEnabled),
+        pointerEvents: false,
     };
 
     if (options.dmabufCaps !== undefined) {
