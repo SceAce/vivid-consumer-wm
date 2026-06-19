@@ -264,19 +264,13 @@ export const LiveWallpaper = GObject.registerClass(
 
         _getWindowActorsForCloneLookup() {
             /*
-             * The legacy in-process renderer asked GNOME Shell for the unfiltered window actor
-             * list with get_window_actors(false), because the renderer/helper
-             * window is intentionally hidden from user-facing Shell lists while
-             * still being a valid clone source. Some newer Shell versions expose
-             * the method without that compatibility argument; keep the original
-             * path when it exists and fall back only when introspection rejects
-             * the argument.
+             * Keep global.get_window_actors() on the modern no-argument GI
+             * signature. Helper windows are hidden from user-facing Shell lists
+             * by targeted filters in gnomeShellOverride.js, not by overriding
+             * this low-level API, so the unfiltered actor list is still available
+             * here for Clutter.Clone source lookup.
              */
-            try {
-                return global.get_window_actors(false);
-            } catch (_e) {
-                return global.get_window_actors();
-            }
+            return global.get_window_actors();
         }
 
         _findHelperWindowActor() {

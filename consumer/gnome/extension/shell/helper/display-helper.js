@@ -70,6 +70,8 @@ const FRAME_INTERVAL_WARN_USEC = 50_000;
 const TEXTURE_REFRESH_WARN_USEC = 8_000;
 const RELEASE_FLUSH_WARN_USEC = 8_000;
 const FRAME_DIAGNOSTIC_LOG_INTERVAL_USEC = 1_000_000;
+const SOCKET_WRITE_WARN_USEC = 16_667;
+const SOCKET_DIAGNOSTIC_LOG_INTERVAL_USEC = 1_000_000;
 
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
@@ -153,6 +155,24 @@ function uint64ToProtocolValue(value) {
     return typeof value === 'bigint' ? value.toString() : String(value);
 }
 
+function appendDmaBufModifierCap(caps, fourcc, modifier, planeCount = 1) {
+    if (!isVividRgbaFourcc(fourcc))
+        return;
+
+    appendUniqueNumber(caps.fourccs, fourcc);
+    if (uint64Equals(modifier, DRM_FORMAT_MOD_LINEAR) ||
+        uint64IsDrmModifierInvalid(modifier)) {
+        appendUniqueNumber(caps.implicitLinearFourccs, fourcc);
+        return;
+    }
+
+    caps.modifiers.push({
+        fourcc,
+        modifier: uint64ToProtocolValue(modifier),
+        planeCount: Number(planeCount) > 0 ? Number(planeCount) : 1,
+    });
+}
+
 function callDisplayConsumerFunction(name, ...args) {
     const fn = DisplayConsumer?.[name];
     if (typeof fn !== 'function')
@@ -215,6 +235,25 @@ function gdkDmabufFormatAt(formats, index) {
     return [0, DRM_FORMAT_MOD_INVALID];
 }
 
+function queryVulkanRelayCaps() {
+    const text = stringFromDisplayConsumer(
+        callDisplayConsumerFunction('dmabuf_texture_query_vulkan_relay_caps_json'));
+    if (!text)
+        return null;
+
+    try {
+        const parsed = JSON.parse(text);
+        return parsed && typeof parsed === 'object' ? parsed : null;
+    } catch (error) {
+        log(`Vulkan relay caps JSON parse failed: ${error}; payload=${text}`);
+        return {
+            available: false,
+            probe: 'vulkan-relay-json-parse-failed',
+            diagnostics: String(error),
+        };
+    }
+}
+
 function buildDmaBufCaps() {
     const caps = {
         version: 3,
@@ -238,6 +277,51 @@ function buildDmaBufCaps() {
         diagnostics: '',
     };
 
+    /*
+     * Prefer the waywallen-style GNOME path when available: a private Vulkan
+     * relay imports producer DMA-BUFs with native modifiers/device-local
+     * memory, then exports a LINEAR shadow for GDK. The caps below describe
+     * the relay import leg, so direct-import-v1 is intentionally not advertised
+     * in this mode; otherwise the daemon could legally choose a modifier that
+     * only the Vulkan relay can import and ask GdkDmabufTextureBuilder to import
+     * it directly.
+     */
+    const relayCaps = queryVulkanRelayCaps();
+    if (relayCaps?.available && Array.isArray(relayCaps.formats)) {
+        const relayFormats = relayCaps.formats
+            .filter(entry => isVividRgbaFourcc(Number(entry?.fourcc)));
+        if (relayFormats.length > 0) {
+            caps.backend = 'gnome-gtk4-vulkan-dmabuf-relay-gdk-shadow';
+            caps.probe = String(relayCaps.probe ?? 'vulkan-relay-format-probe');
+            caps.relayModes = ['shadow-copy-v1'];
+            caps.renderNode = String(relayCaps.renderNode ?? '');
+            caps.deviceUuid = String(relayCaps.deviceUuid ?? '');
+            caps.driverUuid = String(relayCaps.driverUuid ?? '');
+            caps.memoryHints = relayCaps.supportsDeviceLocal
+                ? ['device-local', 'host-visible']
+                : ['host-visible'];
+            caps.textureTarget = 'VulkanRelayShadowGdkDmabufTexture';
+            caps.diagnostics =
+                `relayDrm=${relayCaps.drmRenderMajor ?? 0}:${relayCaps.drmRenderMinor ?? 0}`;
+
+            for (const entry of relayFormats) {
+                appendDmaBufModifierCap(caps,
+                                        Number(entry.fourcc),
+                                        entry.modifier,
+                                        Number(entry.planeCount ?? 1));
+            }
+            if (caps.modifiers.length === 0)
+                caps.memoryHints.push('implicit-linear');
+            return caps;
+        }
+
+        caps.diagnostics = 'vulkan relay caps contained no supported RGBA formats';
+    } else if (relayCaps) {
+        caps.diagnostics =
+            `vulkan relay unavailable stage=${relayCaps.stage ?? '(unknown)'} ` +
+            `rc=${relayCaps.rc ?? '(unknown)'}`;
+    }
+
     try {
         const display = Gdk.Display.get_default();
         caps.renderNode = stringFromDisplayConsumer(
@@ -258,10 +342,9 @@ function buildDmaBufCaps() {
             if (!isVividRgbaFourcc(fourcc))
                 continue;
 
-            appendUniqueNumber(caps.fourccs, fourcc);
             if (uint64Equals(modifier, DRM_FORMAT_MOD_LINEAR) ||
                 uint64IsDrmModifierInvalid(modifier)) {
-                appendUniqueNumber(caps.implicitLinearFourccs, fourcc);
+                appendDmaBufModifierCap(caps, fourcc, modifier, 1);
                 continue;
             }
 
@@ -280,11 +363,7 @@ function buildDmaBufCaps() {
                     display,
                     fourcc,
                     modifier) ?? 0);
-            caps.modifiers.push({
-                fourcc,
-                modifier: uint64ToProtocolValue(modifier),
-                planeCount: probedPlaneCount > 0 ? probedPlaneCount : 1,
-            });
+            appendDmaBufModifierCap(caps, fourcc, modifier, probedPlaneCount);
         }
 
         if (caps.fourccs.length > 0) {
@@ -2423,6 +2502,9 @@ class DisplayConnection {
         this._receiverSignalIds = [];
         this._writeQueue = [];
         this._writePending = false;
+        this._lastSocketDiagnosticLogUsec = 0;
+        this._suppressedSocketDiagnostics = 0;
+        this._coalescedPointerMotionCount = 0;
         this._cancellable = new Gio.Cancellable();
         this._reconnectSourceId = 0;
         this._lastWindowState = null;
@@ -2541,6 +2623,9 @@ class DisplayConnection {
         this._socketClient = null;
         this._writeQueue = [];
         this._writePending = false;
+        this._lastSocketDiagnosticLogUsec = 0;
+        this._suppressedSocketDiagnostics = 0;
+        this._coalescedPointerMotionCount = 0;
 
         if (reconnect)
             this._scheduleReconnect();
@@ -2651,15 +2736,16 @@ class DisplayConnection {
     }
 
     _sendConsumerCaps() {
+        const dmabufCaps = buildDmaBufCaps();
         this._queueFrame(encodeJsonFrame(REQ_CONSUMER_CAPS, {
             bufferImports: [{
                 memoryType: 'dmabuf',
-                renderer: 'gtk4-gdk-dmabuf-texture-builder',
+                renderer: dmabufCaps.backend ?? 'gtk4-gdk-dmabuf-texture-builder',
                 fourcc: ['XRGB8888', 'ARGB8888', 'XBGR8888', 'ABGR8888'],
                 modifiers: true,
-                relayModes: ['direct-import-v1', 'shadow-copy-v1'],
+                relayModes: dmabufCaps.relayModes ?? ['direct-import-v1', 'shadow-copy-v1'],
             }],
-            dmabufCaps: buildDmaBufCaps(),
+            dmabufCaps,
             explicitSync: true,
             pointerEvents: true,
             mediaState: true,
@@ -2735,14 +2821,64 @@ class DisplayConnection {
             frame = encodeFrame(REQ_POINTER_AXIS, body);
         }
 
-        return frame ? this._queueFrame(frame) : false;
+        if (!frame)
+            return false;
+
+        const queueKey = type === 'mousemove' ? `pointer-motion:${outputId}` : null;
+        const pointerBarrier = type === 'mousedown' || type === 'mouseup' || type === 'wheel';
+        return this._queueFrame(frame, {
+            queueKey,
+            kind: type === 'mousemove' ? 'pointer-motion' : 'pointer-discrete',
+            pointerBarrier,
+        });
     }
 
-    _queueFrame(bytes) {
+    _queueFrame(bytes, options = {}) {
         if (!this._output)
             return false;
 
-        this._writeQueue.push(bytes);
+        const queueKey = options.queueKey ?? null;
+        const nowUsec = GLib.get_monotonic_time();
+
+        /*
+         * Pointer motion is a latest-state signal. When the producer socket is
+         * momentarily busy with FRAME_READY traffic or audio samples, replaying
+         * every stale motion packet makes parallax visibly lag behind fast
+         * cursor movement. Keep only the newest motion per output, but never
+         * coalesce across a discrete pointer packet: button and wheel frames
+         * carry their own coordinates and define an ordering boundary that must
+         * stay intact for click/scroll semantics.
+         */
+        if (queueKey) {
+            for (let i = this._writeQueue.length - 1; i >= 0; i--) {
+                const item = this._writeQueue[i];
+                if (item?.pointerBarrier)
+                    break;
+                if (item?.queueKey !== queueKey)
+                    continue;
+
+                this._writeQueue[i] = {
+                    bytes,
+                    queueKey,
+                    kind: options.kind ?? item.kind,
+                    pointerBarrier: Boolean(options.pointerBarrier),
+                    queuedAtUsec: nowUsec,
+                    replacedAtUsec: nowUsec,
+                };
+                this._coalescedPointerMotionCount++;
+                this._flushWriteQueue();
+                return true;
+            }
+        }
+
+        this._writeQueue.push({
+            bytes,
+            queueKey,
+            kind: options.kind ?? 'frame',
+            pointerBarrier: Boolean(options.pointerBarrier),
+            queuedAtUsec: nowUsec,
+            replacedAtUsec: 0,
+        });
         this._flushWriteQueue();
         return true;
     }
@@ -2751,9 +2887,10 @@ class DisplayConnection {
         if (!this._output || this._writePending || this._writeQueue.length === 0)
             return;
 
-        const bytes = this._writeQueue[0];
+        const item = this._writeQueue[0];
         this._writePending = true;
-        this._output.write_all_async(bytes, GLib.PRIORITY_DEFAULT, this._cancellable, (stream, result) => {
+        const writeStartUsec = GLib.get_monotonic_time();
+        this._output.write_all_async(item.bytes, GLib.PRIORITY_DEFAULT, this._cancellable, (stream, result) => {
             if (stream !== this._output)
                 return;
 
@@ -2766,9 +2903,39 @@ class DisplayConnection {
                 return;
             }
 
+            const nowUsec = GLib.get_monotonic_time();
+            this._maybeLogSocketWriteTiming(item, {
+                writeUsec: nowUsec - writeStartUsec,
+                queuedUsec: nowUsec - (item.queuedAtUsec ?? writeStartUsec),
+                remaining: this._writeQueue.length,
+            });
+
             this._writePending = false;
             this._flushWriteQueue();
         });
+    }
+
+    _maybeLogSocketWriteTiming(item, timing) {
+        if (timing.queuedUsec <= SOCKET_WRITE_WARN_USEC)
+            return;
+
+        const nowUsec = GLib.get_monotonic_time();
+        if (this._lastSocketDiagnosticLogUsec > 0 &&
+            nowUsec - this._lastSocketDiagnosticLogUsec < SOCKET_DIAGNOSTIC_LOG_INTERVAL_USEC) {
+            this._suppressedSocketDiagnostics++;
+            return;
+        }
+
+        const suppressed = this._suppressedSocketDiagnostics;
+        const coalesced = this._coalescedPointerMotionCount;
+        this._suppressedSocketDiagnostics = 0;
+        this._coalescedPointerMotionCount = 0;
+        this._lastSocketDiagnosticLogUsec = nowUsec;
+
+        log(`socket write slow kind=${item.kind ?? 'frame'} ` +
+            `queued=${formatUsec(timing.queuedUsec)} write=${formatUsec(timing.writeUsec)} ` +
+            `remaining=${timing.remaining} coalescedPointerMotion=${coalesced} ` +
+            `suppressed=${suppressed}`);
     }
 
     _handleFrame(opcode, body, fdList) {

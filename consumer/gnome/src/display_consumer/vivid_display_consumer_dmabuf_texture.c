@@ -6,6 +6,7 @@
  */
 
 #include "vivid_display_consumer_dmabuf_texture.h"
+#include "vivid_display_consumer_vulkan_backend.h"
 
 #include <EGL/egl.h>
 #include <EGL/eglext.h>
@@ -14,6 +15,7 @@
 #include <fcntl.h>
 #include <gbm.h>
 #include <gdk/wayland/gdkwayland.h>
+#include <json-glib/json-glib.h>
 #include <poll.h>
 #include <stdlib.h>
 #include <string.h>
@@ -39,6 +41,18 @@ typedef struct
     guint8   device_uuid[16];
     guint8   driver_uuid[16];
 } VulkanUuidMatch;
+
+typedef struct
+{
+    guint32 fourcc;
+    guint64 modifier;
+    guint32 plane_count;
+} VulkanRelayModifierCap;
+
+typedef struct
+{
+    GArray* caps; /* VulkanRelayModifierCap */
+} VulkanRelayCapsProbe;
 
 typedef enum
 {
@@ -408,6 +422,182 @@ vivid_display_consumer_dmabuf_texture_get_driver_uuid(GdkDisplay* display)
         vivid_display_consumer_dmabuf_texture_get_render_node(display);
     VulkanUuidMatch match = vulkan_uuid_for_render_node(render_node);
     return match.found ? uuid_bytes_to_hex(match.driver_uuid) : NULL;
+}
+
+static void
+vulkan_relay_caps_emit(uint32_t fourcc,
+                       uint64_t modifier,
+                       uint32_t plane_count,
+                       void*    user_data)
+{
+    VulkanRelayCapsProbe* probe = user_data;
+    if (!probe || !probe->caps)
+        return;
+
+    const VulkanRelayModifierCap cap = {
+        .fourcc = fourcc,
+        .modifier = modifier,
+        .plane_count = plane_count > 0 ? plane_count : 1,
+    };
+    g_array_append_val(probe->caps, cap);
+}
+
+static void
+json_builder_add_uint64_string(JsonBuilder* builder,
+                               const char*  member,
+                               guint64      value)
+{
+    gchar text[32];
+    g_snprintf(text, sizeof(text), "%" G_GUINT64_FORMAT, value);
+    json_builder_set_member_name(builder, member);
+    json_builder_add_string_value(builder, text);
+}
+
+static char*
+build_vulkan_relay_caps_error_json(const char* stage,
+                                   gint        rc)
+{
+    g_autoptr(JsonBuilder) builder = json_builder_new();
+    json_builder_begin_object(builder);
+    json_builder_set_member_name(builder, "available");
+    json_builder_add_boolean_value(builder, FALSE);
+    json_builder_set_member_name(builder, "backend");
+    json_builder_add_string_value(builder, "vulkan-dmabuf-relay");
+    json_builder_set_member_name(builder, "probe");
+    json_builder_add_string_value(builder, "vulkan-relay-unavailable");
+    json_builder_set_member_name(builder, "stage");
+    json_builder_add_string_value(builder, stage ? stage : "unknown");
+    json_builder_set_member_name(builder, "rc");
+    json_builder_add_int_value(builder, rc);
+    json_builder_end_object(builder);
+
+    g_autoptr(JsonNode) root = json_builder_get_root(builder);
+    return json_to_string(root, FALSE);
+}
+
+/**
+ * vivid_display_consumer_dmabuf_texture_query_vulkan_relay_caps_json:
+ *
+ * Returns a compact JSON description of the private Vulkan relay device.
+ *
+ * The GNOME helper cannot expose a host-owned VkDevice through GJS, so the
+ * shadow-copy path mirrors waywallen's DMABUF_RELAY backend: this library owns
+ * a small Vulkan instance/device, imports producer DMA-BUFs there, blits into a
+ * LINEAR export, and hands that shadow DMA-BUF to GDK. These caps describe the
+ * first leg of that route, not GDK's final shadow import. Advertising them lets
+ * the daemon choose same-device vendor modifiers and DEVICE_LOCAL producer
+ * allocations without pretending that GdkDmabufTextureBuilder can import those
+ * producer buffers directly.
+ *
+ * Returns: (transfer full): JSON object with available/probe/renderNode/UUID
+ * fields and a formats array of {fourcc, modifier, planeCount}.
+ */
+char*
+vivid_display_consumer_dmabuf_texture_query_vulkan_relay_caps_json(void)
+{
+#ifndef WW_HAVE_VULKAN
+    return build_vulkan_relay_caps_error_json("compile-disabled", -ENOSYS);
+#else
+    ww_vk_owned_t owned = {0};
+    int rc = ww_vk_create_owned(&owned);
+    if (rc != 0)
+        return build_vulkan_relay_caps_error_json("create-owned-device", rc);
+
+    ww_vk_backend_t backend = {0};
+    rc = ww_vk_backend_load(&backend,
+                            owned.instance,
+                            owned.physical_device,
+                            owned.device,
+                            owned.queue_family_index,
+                            NULL,
+                            false);
+    if (rc != 0) {
+        char* json = build_vulkan_relay_caps_error_json("load-backend", rc);
+        ww_vk_destroy_owned(&owned);
+        return json;
+    }
+
+    VulkanRelayCapsProbe probe = {
+        .caps = g_array_new(FALSE, FALSE, sizeof(VulkanRelayModifierCap)),
+    };
+    const uint32_t want_features =
+        VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT | VK_FORMAT_FEATURE_TRANSFER_SRC_BIT;
+    rc = ww_vk_query_format_caps(&backend, want_features, vulkan_relay_caps_emit, &probe);
+
+    guint32 render_major = 0;
+    guint32 render_minor = 0;
+    gchar render_node[64] = "";
+    if (ww_vk_query_drm_render_node(&backend, &render_major, &render_minor) == 0)
+        find_render_node_for_drm_ids(render_major, render_minor, render_node, sizeof(render_node));
+
+    guint8 device_uuid[16] = {0};
+    guint8 driver_uuid[16] = {0};
+    g_autofree gchar* device_uuid_text = NULL;
+    g_autofree gchar* driver_uuid_text = NULL;
+    if (ww_vk_query_device_uuid(&backend, device_uuid, driver_uuid) == 0) {
+        device_uuid_text = uuid_bytes_to_hex(device_uuid);
+        driver_uuid_text = uuid_bytes_to_hex(driver_uuid);
+    }
+
+    int supports_device_local = 0;
+    (void)ww_vk_query_supports_device_local(&backend, &supports_device_local);
+
+    g_autoptr(JsonBuilder) builder = json_builder_new();
+    json_builder_begin_object(builder);
+    json_builder_set_member_name(builder, "available");
+    json_builder_add_boolean_value(builder, rc == 0 && probe.caps && probe.caps->len > 0);
+    json_builder_set_member_name(builder, "backend");
+    json_builder_add_string_value(builder, "vulkan-dmabuf-relay");
+    json_builder_set_member_name(builder, "probe");
+    json_builder_add_string_value(builder,
+                                  rc == 0 ? "vulkan-relay-format-probe"
+                                          : "vulkan-relay-format-probe-failed");
+    json_builder_set_member_name(builder, "rc");
+    json_builder_add_int_value(builder, rc);
+    json_builder_set_member_name(builder, "renderNode");
+    json_builder_add_string_value(builder, render_node);
+    json_builder_set_member_name(builder, "drmRenderMajor");
+    json_builder_add_int_value(builder, render_major);
+    json_builder_set_member_name(builder, "drmRenderMinor");
+    json_builder_add_int_value(builder, render_minor);
+    json_builder_set_member_name(builder, "deviceUuid");
+    json_builder_add_string_value(builder, device_uuid_text ? device_uuid_text : "");
+    json_builder_set_member_name(builder, "driverUuid");
+    json_builder_add_string_value(builder, driver_uuid_text ? driver_uuid_text : "");
+    json_builder_set_member_name(builder, "supportsDeviceLocal");
+    json_builder_add_boolean_value(builder, supports_device_local != 0);
+    json_builder_set_member_name(builder, "wantFeatures");
+    json_builder_begin_array(builder);
+    json_builder_add_string_value(builder, "sampled-image");
+    json_builder_add_string_value(builder, "transfer-src");
+    json_builder_end_array(builder);
+    json_builder_set_member_name(builder, "formats");
+    json_builder_begin_array(builder);
+    if (rc == 0 && probe.caps) {
+        for (guint i = 0; i < probe.caps->len; i++) {
+            const VulkanRelayModifierCap cap =
+                g_array_index(probe.caps, VulkanRelayModifierCap, i);
+            json_builder_begin_object(builder);
+            json_builder_set_member_name(builder, "fourcc");
+            json_builder_add_int_value(builder, cap.fourcc);
+            json_builder_add_uint64_string(builder, "modifier", cap.modifier);
+            json_builder_set_member_name(builder, "planeCount");
+            json_builder_add_int_value(builder, cap.plane_count);
+            json_builder_end_object(builder);
+        }
+    }
+    json_builder_end_array(builder);
+    json_builder_end_object(builder);
+
+    g_autoptr(JsonNode) root = json_builder_get_root(builder);
+    char* json = json_to_string(root, FALSE);
+
+    if (probe.caps)
+        g_array_unref(probe.caps);
+    ww_vk_backend_unload(&backend);
+    ww_vk_destroy_owned(&owned);
+    return json;
+#endif
 }
 
 /**

@@ -26,6 +26,8 @@ char* vivid_display_consumer_dmabuf_texture_get_device_uuid(GdkDisplay* display)
 
 char* vivid_display_consumer_dmabuf_texture_get_driver_uuid(GdkDisplay* display);
 
+char* vivid_display_consumer_dmabuf_texture_query_vulkan_relay_caps_json(void);
+
 guint vivid_display_consumer_dmabuf_texture_probe_plane_count(GdkDisplay* display,
                                                               guint32     fourcc,
                                                               guint64     modifier);

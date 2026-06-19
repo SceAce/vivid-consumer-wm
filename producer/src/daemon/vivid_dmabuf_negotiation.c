@@ -360,16 +360,30 @@ vivid_dmabuf_negotiate_pick(const VividDmaBufPeerCaps* producer,
     }
 
     if (same_device) {
-        if ((consumer->relay_modes & VIVID_DMABUF_RELAY_MODE_DIRECT_IMPORT) == 0) {
-            if (out_error)
-                *out_error = VIVID_DMABUF_NEGOTIATE_ERROR_NO_RELAY_MODE;
-            return FALSE;
-        }
-
         VividDmaBufModifierCap cap = {0};
         if (!pick_same_device_format(producer, consumer, &cap)) {
             if (out_error)
                 *out_error = VIVID_DMABUF_NEGOTIATE_ERROR_NO_FORMAT_INTERSECTION;
+            return FALSE;
+        }
+
+        guint32 relay_mode = 0;
+        /*
+         * GNOME/GTK consumers may be waywallen-style relay endpoints: Vulkan
+         * imports the producer DMA-BUF and then exposes a separate LINEAR shadow
+         * DMA-BUF to GDK. In that mode direct-import-v1 is intentionally absent,
+         * but same-device non-LINEAR modifiers are still the best producer-side
+         * allocation because the relay, not GDK, imports them. Prefer direct
+         * when both modes are valid for the chosen tuple; otherwise allow the
+         * relay to carry the same exact modifier/plane intersection.
+         */
+        if ((consumer->relay_modes & VIVID_DMABUF_RELAY_MODE_DIRECT_IMPORT) != 0) {
+            relay_mode = VIVID_DMABUF_RELAY_MODE_DIRECT_IMPORT;
+        } else if ((consumer->relay_modes & VIVID_DMABUF_RELAY_MODE_SHADOW_COPY) != 0) {
+            relay_mode = VIVID_DMABUF_RELAY_MODE_SHADOW_COPY;
+        } else {
+            if (out_error)
+                *out_error = VIVID_DMABUF_NEGOTIATE_ERROR_NO_RELAY_MODE;
             return FALSE;
         }
 
@@ -379,7 +393,7 @@ vivid_dmabuf_negotiate_pick(const VividDmaBufPeerCaps* producer,
             : cap.modifier;
         out_scheme->plane_count = cap.plane_count;
         out_scheme->same_device = TRUE;
-        out_scheme->relay_mode = VIVID_DMABUF_RELAY_MODE_DIRECT_IMPORT;
+        out_scheme->relay_mode = relay_mode;
         out_scheme->memory_hint =
             pick_memory_hint_same_device(producer->memory_hints,
                                          consumer->memory_hints);

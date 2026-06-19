@@ -45,6 +45,7 @@
 #define RELEASE_REAPER_TIMEOUT_MSEC 500u
 #define RELEASE_GATE_WAIT_TIMEOUT_MSEC 600u
 #define UNBIND_ACK_TIMEOUT_MSEC 150u
+#define CLIENT_SOCKET_SOURCE_PRIORITY G_PRIORITY_HIGH
 #define DMABUF_CAPS_VERSION 3u
 #define DMABUF_CAPS_FIELD "dmabufCaps"
 #define DMABUF_CAPS_VERSION_FIELD "version"
@@ -1189,6 +1190,39 @@ renderer_caps_to_peer_caps(const VividProducerRendererDmaBufCaps* renderer_caps,
     }
 }
 
+static void
+dmabuf_log_peer_caps(const gchar*              label,
+                     const VividDmaBufPeerCaps* caps)
+{
+    if (!caps)
+        return;
+
+    g_message("VividProducer: %s DMA-BUF caps summary modifiers=%u relay=0x%x "
+              "memory-hints=0x%x sync=0x%x color=0x%x drm=%u:%u render-node=%s "
+              "blacklist=%u",
+              label ? label : "peer",
+              caps->formats.n_modifiers,
+              caps->relay_modes,
+              caps->memory_hints,
+              caps->sync_caps,
+              caps->color_caps,
+              caps->identity.drm_render_major,
+              caps->identity.drm_render_minor,
+              caps->identity.render_node[0] ? caps->identity.render_node : "(unknown)",
+              caps->n_blacklist);
+    for (guint32 i = 0; i < caps->formats.n_modifiers; i++) {
+        const VividDmaBufModifierCap* cap = &caps->formats.modifiers[i];
+        g_message("VividProducer: %s DMA-BUF caps[%u] fourcc=0x%08x "
+                  "modifier=0x%016" G_GINT64_MODIFIER "x planes=%u linear=%s",
+                  label ? label : "peer",
+                  i,
+                  cap->fourcc,
+                  (guint64)cap->modifier,
+                  cap->plane_count,
+                  dmabuf_modifier_is_implicit_linear(cap->modifier) ? "true" : "false");
+    }
+}
+
 static gboolean
 output_negotiate_linear_dmabuf(Output*                                output,
                                Producer*                              producer,
@@ -1269,6 +1303,9 @@ output_negotiate_linear_dmabuf(Output*                                output,
                                                   entry->fourcc,
                                                   entry->modifier);
     }
+
+    dmabuf_log_peer_caps("producer", &producer_caps);
+    dmabuf_log_peer_caps("consumer", &caps->peer_caps);
 
     VividDmaBufNegotiatedScheme scheme = {0};
     VividDmaBufNegotiateError negotiate_error = VIVID_DMABUF_NEGOTIATE_ERROR_NONE;
@@ -5053,10 +5090,23 @@ client_new(Producer* producer, gint fd)
     g_queue_init(&client->deferred_frames);
     vivid_display_recv_state_init(&client->recv_state);
     set_fd_nonblocking(fd);
-    client->source_id = g_unix_fd_add(fd,
-                                      G_IO_IN | G_IO_HUP | G_IO_ERR | G_IO_NVAL,
-                                      client_fd_ready,
-                                      client);
+
+    /*
+     * Pointer input reaches the scene renderer through this same client socket.
+     * The display frame clock is intentionally high priority so FRAME_READY
+     * cadence stays stable, but leaving the socket reader at GLib's default
+     * priority lets steady frame ticks repeatedly run before pending pointer
+     * packets. Under fast mouse movement that turns parallax into a queue of
+     * stale positions. Keep socket reads at the frame-clock priority so input
+     * and presentation progress together instead of one starving the other.
+     */
+    GSource* source = g_unix_fd_source_new(fd,
+                                           G_IO_IN | G_IO_HUP | G_IO_ERR | G_IO_NVAL);
+    g_source_set_priority(source, CLIENT_SOCKET_SOURCE_PRIORITY);
+    g_source_set_callback(source, (GSourceFunc)client_fd_ready, client, NULL);
+    g_source_set_name(source, "vivid-producer-client-socket");
+    client->source_id = g_source_attach(source, NULL);
+    g_source_unref(source);
     g_ptr_array_add(producer->clients, client);
     return client;
 }

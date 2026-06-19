@@ -50,26 +50,47 @@ export class GnomeShellOverride {
         this._wallpaperActors.forEach(actor => actor.destroy());
         this._wallpaperActors.clear();
 
-        Main.layoutManager._updateBackgrounds();
+        const tryReloadStep = (label, callback) => {
+            try {
+                callback();
+            } catch (error) {
+                logger.warn(`background reload step failed label=${label}: ${error}`);
+            }
+        };
+
+        tryReloadStep('layout-backgrounds', () => Main.layoutManager._updateBackgrounds());
         // `Main.screenShield` is null if the user doesn't use Gnome Shell locking.
-        if (Main.screenShield?._dialog?._updateBackgrounds != null)
-            Main.screenShield._dialog._updateBackgrounds();
+        tryReloadStep('screen-shield-backgrounds', () => {
+            if (Main.screenShield?._dialog?._updateBackgrounds != null)
+                Main.screenShield._dialog._updateBackgrounds();
+        });
 
         /**
          * WorkspaceBackground has its own bgManager,
          * we have to recreate it to use our actors, so it can set radius to our actor.
+         *
+         * Shell calls into other overview/dock extensions while rebuilding
+         * workspaces. During session shutdown, extension disable, or dash-to-dock
+         * reload, those extensions can already have torn down singleton state
+         * such as dockManager. Treat workspace refresh as best-effort so a
+         * third-party teardown race cannot mark this extension ERROR and prevent
+         * the helper from starting on the next producer run.
          */
-        Main.overview._overview._controls._workspacesDisplay._updateWorkspacesViews();
+        tryReloadStep('workspace-views', () =>
+            Main.overview._overview._controls._workspacesDisplay._updateWorkspacesViews()
+        );
 
         /**
          *  Blur My Shell
          */
-        if (Main.extensionManager._enabledExtensions.includes('blur-my-shell@aunetx')) {
-            // This will trigger the `update_backgrounds` method of overview, sceenshot and coverflow alt tab.
-            Main.layoutManager.emit('monitors-changed');
-            // This will trigger the `reset` method of panel.
-            global.display.emit('workareas-changed');
-        }
+        tryReloadStep('blur-my-shell-signals', () => {
+            if (Main.extensionManager._enabledExtensions.includes('blur-my-shell@aunetx')) {
+                // This will trigger the `update_backgrounds` method of overview, sceenshot and coverflow alt tab.
+                Main.layoutManager.emit('monitors-changed');
+                // This will trigger the `reset` method of panel.
+                global.display.emit('workareas-changed');
+            }
+        });
     }
 
     reloadBackgrounds() {
