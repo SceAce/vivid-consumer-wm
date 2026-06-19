@@ -57,3 +57,21 @@ test(
     'GJS_PATH=' + meson.current_source_dir() / 'src',
   ],
 )
+
+test(
+  'output-model',
+  gjs,
+  args: files('tests/output-model.test.js'),
+  env: [
+    'GJS_PATH=' + meson.current_source_dir() / 'src',
+  ],
+)
+
+test(
+  'layer-shell-surfaces',
+  gjs,
+  args: files('tests/layer-shell-surfaces.test.js'),
+  env: [
+    'GJS_PATH=' + meson.current_source_dir() / 'src',
+  ],
+)

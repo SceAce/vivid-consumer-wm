@@ -81,6 +81,27 @@ function testPointerFeatureAdvertisementEnabled() {
     assertEqual(options.pointerEventsEnabled, true, 'pointer events enabled');
 }
 
+function testHiddenExitAfterMsOption() {
+    const options = RuntimeArgs.parseRuntimeArgs(['--exit-after-ms', '250'], {
+        runtimeDir: '/run/user/1000',
+    });
+
+    assertEqual(options.exitAfterMs, 250, 'bounded runtime duration');
+}
+
+function testInvalidExitAfterMsFails() {
+    assertThrows(
+        () => RuntimeArgs.parseRuntimeArgs(['--exit-after-ms', '0'], {runtimeDir: '/run/user/1000'}),
+        '--exit-after-ms requires a positive integer',
+        'zero exit-after-ms',
+    );
+    assertThrows(
+        () => RuntimeArgs.parseRuntimeArgs(['--exit-after-ms', 'later'], {runtimeDir: '/run/user/1000'}),
+        '--exit-after-ms requires a positive integer',
+        'non-numeric exit-after-ms',
+    );
+}
+
 function testMissingSocketPathFails() {
     assertThrows(
         () => RuntimeArgs.parseRuntimeArgs(['--socket'], {runtimeDir: '/run/user/1000'}),
@@ -120,6 +141,8 @@ function testUnknownArgumentFails() {
     testSupportedCompositorModes,
     testInputDisabledByDefault,
     testPointerFeatureAdvertisementEnabled,
+    testHiddenExitAfterMsOption,
+    testInvalidExitAfterMsFails,
     testMissingSocketPathFails,
     testMissingCompositorModeFails,
     testInvalidCompositorModeFails,

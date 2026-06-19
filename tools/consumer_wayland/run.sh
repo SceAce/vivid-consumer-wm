@@ -44,6 +44,38 @@ build() {
     chmod +x "${VIVID_WAYLAND_PROBE}"
 }
 
+gtk4_layer_shell_preload() {
+    local candidate
+
+    for candidate in \
+        /usr/lib/libgtk4-layer-shell.so \
+        /usr/lib64/libgtk4-layer-shell.so \
+        /usr/local/lib/libgtk4-layer-shell.so; do
+        if [[ -r "${candidate}" ]]; then
+            printf '%s\n' "${candidate}"
+            return 0
+        fi
+    done
+
+    return 1
+}
+
+run_probe_binary() {
+    local preload
+
+    preload="$(gtk4_layer_shell_preload || true)"
+    if [[ -n "${preload}" ]]; then
+        if [[ -n "${LD_PRELOAD:-}" ]]; then
+            LD_PRELOAD="${preload}:${LD_PRELOAD}" "${VIVID_WAYLAND_PROBE}" "$@"
+        else
+            LD_PRELOAD="${preload}" "${VIVID_WAYLAND_PROBE}" "$@"
+        fi
+        return $?
+    fi
+
+    "${VIVID_WAYLAND_PROBE}" "$@"
+}
+
 run_probe() {
     case "${1:-}" in
         --help|-h)
@@ -56,7 +88,7 @@ run_probe() {
         build
     fi
 
-    "${VIVID_WAYLAND_PROBE}" "$@"
+    run_probe_binary "$@"
 }
 
 case "${1:-help}" in

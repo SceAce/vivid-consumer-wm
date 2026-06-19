@@ -41,6 +41,16 @@ function parseRuntimeArgs(argv, options = {}) {
             parsed.pointerEventsEnabled = false;
         } else if (arg === '--enable-pointer-events') {
             parsed.pointerEventsEnabled = true;
+        } else if (arg === '--exit-after-ms') {
+            index += 1;
+            if (index >= argv.length) {
+                throw new Error('--exit-after-ms requires a positive integer');
+            }
+            const exitAfterMs = Number(argv[index]);
+            if (!Number.isInteger(exitAfterMs) || exitAfterMs <= 0) {
+                throw new Error('--exit-after-ms requires a positive integer');
+            }
+            parsed.exitAfterMs = exitAfterMs;
         } else {
             throw new Error(`Unknown argument: ${arg}`);
         }
