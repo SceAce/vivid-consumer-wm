@@ -28,6 +28,7 @@ Usage:
 Aliases:
   tools/vivid.sh consumer gnome ...
   tools/vivid.sh consumer kde ...
+  tools/vivid.sh consumer wayland ...
   tools/vivid.sh producer build-direct-run
   tools/vivid.sh producer run-direct-run
   tools/vivid.sh producer prefetch
@@ -282,6 +283,7 @@ run_clean() {
             clean_producer
             clean_gnome_consumer
             clean_kde_consumer
+            clean_wayland_consumer
             ;;
         *)
             die_usage "unknown clean target: ${target}"
@@ -390,6 +392,7 @@ run_build_group() {
             run_direct_run build "$@"
             build_gnome_consumer
             run_kde build
+            run_wayland build
             ;;
         *)
             die_usage "unknown build target: ${target}"

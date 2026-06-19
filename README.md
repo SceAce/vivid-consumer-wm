@@ -56,12 +56,41 @@ tools/vivid.sh direct-run run
 
 Direct-run artifacts stay in `producer/.build/direct-run`.
 
+### Wayland Consumer
+
+Vivid includes an experimental generic Wayland layer-shell consumer for
+Hyprland, niri, and other compositors with compatible layer-shell behavior.
+
+```sh
+tools/vivid.sh build wayland
+tools/vivid.sh consumer wayland build
+tools/vivid.sh wayland run --probe
+tools/vivid.sh wayland run --compositor hyprland
+tools/vivid.sh wayland run --compositor niri
+```
+
+Wayland consumer artifacts stay in `consumer/wayland/.build`. The consumer
+connects to the producer-owned `display-v1` socket and receives rendered frame
+buffers; it does not parse wallpaper package formats itself. This keeps dynamic
+wallpaper format support owned by the producer and preserves every format the
+producer can render.
+
+Required dependencies include `meson`, `ninja`, `gjs`, GTK 4 development files
+and GI typelib, `gtk4-layer-shell-0`, the `Gtk4LayerShell-1.0` typelib, a
+layer-shell compositor, the shared display consumer library, and a running Vivid
+producer. See `consumer/wayland/README.md` for details, limitations, and manual
+Hyprland/niri verification steps.
+
 ### Clean
 
 ```sh
 tools/vivid.sh clean flatpak
 tools/vivid.sh clean direct-run
+tools/vivid.sh clean wayland
 ```
+
+Clean commands are guarded so build cleanup only removes repository-local
+`.build` paths.
 
 Credits:
 
