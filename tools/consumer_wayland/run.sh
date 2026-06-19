@@ -22,15 +22,11 @@ EOF
 }
 
 probe_usage() {
-    cat <<'EOF'
-Usage: vivid-consumer-wayland-probe [--help|--probe]
+    if [[ ! -x "${VIVID_WAYLAND_PROBE}" ]]; then
+        build
+    fi
 
-Options:
-  --help   Print this help and exit.
-  --probe  Initialize GTK and probe Gtk4LayerShell GI bindings.
-
-This probe does not connect to a Vivid producer socket.
-EOF
+    "${VIVID_WAYLAND_PROBE}" --help
 }
 
 configure() {

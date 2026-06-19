@@ -20,6 +20,7 @@ layer_shell_required = layer_shell.found() ? 'true' : 'false'
 probe_config = configuration_data()
 probe_config.set('gjs', gjs.full_path())
 probe_config.set('layer_shell_required', layer_shell_required)
+probe_config.set('source_dir', meson.current_source_dir() / 'src')
 
 probe = configure_file(
   input: 'src/layer-shell-probe.js',
@@ -36,4 +37,23 @@ install_data(
 run_target(
   'probe-help',
   command: [gjs, probe, '--help'],
+)
+
+test(
+  'runtime-args',
+  gjs,
+  args: files('tests/runtime-args.test.js'),
+  env: [
+    'GJS_PATH=' + meson.current_source_dir() / 'src',
+    'XDG_RUNTIME_DIR=/tmp/vivid-wayland-test-runtime',
+  ],
+)
+
+test(
+  'protocol-payloads',
+  gjs,
+  args: files('tests/protocol-payloads.test.js'),
+  env: [
+    'GJS_PATH=' + meson.current_source_dir() / 'src',
+  ],
 )

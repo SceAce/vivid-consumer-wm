@@ -4,14 +4,22 @@ imports.gi.versions.Gtk = '4.0';
 imports.gi.versions.Gdk = '4.0';
 imports.gi.versions.Gtk4LayerShell = '1.0';
 
+imports.searchPath.unshift('@source_dir@');
+
+const RuntimeArgs = imports.runtimeArgs;
+
 const LAYER_SHELL_REQUIRED = @layer_shell_required@;
 
 function printUsage() {
-    print(`Usage: vivid-consumer-wayland-probe [--help|--probe]
+    print(`Usage: vivid-consumer-wayland-probe [options] [--probe]
 
 Options:
-  --help   Print this help and exit.
-  --probe  Initialize GTK and probe Gtk4LayerShell GI bindings.
+  --help                         Print this help and exit.
+  --probe                        Initialize GTK and probe Gtk4LayerShell GI bindings.
+  --socket PATH                  Vivid producer socket path.
+  --compositor MODE              Compositor mode: ${RuntimeArgs.SUPPORTED_COMPOSITORS.join(', ')}.
+  --no-input                     Do not advertise input features.
+  --enable-pointer-events        Advertise pointer input support.
 
 This probe does not connect to a Vivid producer socket.`);
 }
@@ -60,16 +68,23 @@ function main(argv) {
         return 0;
     }
 
-    if (args.length === 1 && args[0] === '--probe') {
+    const probeIndex = args.indexOf('--probe');
+    if (probeIndex !== -1) {
+        args.splice(probeIndex, 1);
+        RuntimeArgs.parseRuntimeArgs(args);
         return probeLayerShell();
     }
 
-    printerr(`Unknown arguments: ${args.join(' ')}`);
-    printUsage();
-    return 2;
+    try {
+        RuntimeArgs.parseRuntimeArgs(args);
+        printUsage();
+        return 0;
+    } catch (error) {
+        printerr(error.message);
+        printUsage();
+        return 2;
+    }
 }
 
 const exitCode = main(ARGV);
-if (exitCode !== 0) {
-    imports.system.exit(exitCode);
-}
+imports.system.exit(exitCode);
