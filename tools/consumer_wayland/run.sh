@@ -9,6 +9,7 @@ fi
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "${SCRIPT_DIR}/../../consumer/wayland" && pwd)"
+REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 . "${SCRIPT_DIR}/build_env.sh"
 
 usage() {
@@ -62,8 +63,15 @@ gtk4_layer_shell_preload() {
 
 run_probe_binary() {
     local preload
+    local display_consumer_dir="${VIVID_DISPLAY_CONSUMER_DIR:-${REPO_ROOT}/consumer/gnome/.build/src/display_consumer}"
 
     preload="$(gtk4_layer_shell_preload || true)"
+    if [[ -d "${display_consumer_dir}" ]]; then
+        export VIVID_DISPLAY_CONSUMER_DIR="${display_consumer_dir}"
+        export GI_TYPELIB_PATH="${display_consumer_dir}${GI_TYPELIB_PATH:+:${GI_TYPELIB_PATH}}"
+        export LD_LIBRARY_PATH="${display_consumer_dir}${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
+    fi
+
     if [[ -n "${preload}" ]]; then
         if [[ -n "${LD_PRELOAD:-}" ]]; then
             LD_PRELOAD="${preload}:${LD_PRELOAD}" "${VIVID_WAYLAND_PROBE}" "$@"

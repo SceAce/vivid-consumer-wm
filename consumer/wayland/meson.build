@@ -75,3 +75,12 @@ test(
     'GJS_PATH=' + meson.current_source_dir() / 'src',
   ],
 )
+
+test(
+  'display-connection-state',
+  gjs,
+  args: files('tests/display-connection-state.test.js'),
+  env: [
+    'GJS_PATH=' + meson.current_source_dir() / 'src',
+  ],
+)

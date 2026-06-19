@@ -7,11 +7,14 @@ imports.gi.versions.Gdk = '4.0';
 imports.searchPath.unshift('@source_dir@');
 
 const GLib = imports.gi.GLib;
+const GIRepository = imports.gi.GIRepository;
 const RuntimeArgs = imports.runtimeArgs;
 const OutputModel = imports.outputModel;
 const LayerShellSurfaces = imports.layerShellSurfaces;
+const DisplayConnection = imports.displayConnection;
 
 const LAYER_SHELL_REQUIRED = @layer_shell_required@;
+const DISPLAY_CONSUMER_DIR = GLib.getenv('VIVID_DISPLAY_CONSUMER_DIR') || '';
 
 function printUsage() {
     print(`Usage: vivid-consumer-wayland-probe [options] [--probe]
@@ -24,7 +27,7 @@ Options:
   --no-input                     Do not advertise input features.
   --enable-pointer-events        Advertise pointer input support.
 
-This probe does not connect to a Vivid producer socket.`);
+Normal run connects to the Vivid display-v1 producer socket and presents frames.`);
 }
 
 function importLayerShell() {
@@ -83,10 +86,159 @@ function collectMonitors(Gdk) {
     return result;
 }
 
+function loadDisplayConsumer() {
+    if (DISPLAY_CONSUMER_DIR !== '') {
+        const repository = GIRepository.Repository.dup_default();
+        repository.prepend_search_path(DISPLAY_CONSUMER_DIR);
+        repository.prepend_library_path(DISPLAY_CONSUMER_DIR);
+    }
+
+    try {
+        return imports.gi.VividDisplayConsumer;
+    } catch (error) {
+        printerr(`VividDisplayConsumer GI import failed: ${error.message}`);
+        printerr('Build the GNOME display consumer library first or set VIVID_DISPLAY_CONSUMER_DIR.');
+        return null;
+    }
+}
+
+function stringFromDisplayConsumer(value) {
+    return typeof value === 'string' ? value.trim() : '';
+}
+
+function callDisplayConsumerFunction(DisplayConsumer, name, ...args) {
+    const fn = DisplayConsumer?.[name];
+    if (typeof fn !== 'function') {
+        return null;
+    }
+
+    try {
+        return fn(...args);
+    } catch (error) {
+        printerr(`VividDisplayConsumer.${name} failed: ${error.message}`);
+        return null;
+    }
+}
+
+function appendUniqueNumber(values, value) {
+    if (!values.includes(value)) {
+        values.push(value);
+    }
+}
+
+function buildDmaBufCaps(DisplayConsumer, Gdk) {
+    const caps = {
+        version: 3,
+        backend: 'wayland-gtk4-gdk-dmabuf-texture-builder',
+        probe: 'unprobed',
+        relayModes: ['direct-import-v1', 'shadow-copy-v1'],
+        renderNode: '',
+        deviceUuid: '',
+        driverUuid: '',
+        vendor: '',
+        pciAddress: '',
+        fourccs: [],
+        modifiers: [],
+        implicitLinearFourccs: [],
+        memoryHints: [],
+        syncCaps: ['implicit', 'explicit-sync-fd', 'drm-syncobj-release'],
+        colorCaps: ['srgb', 'limited-range', 'premultiplied-alpha'],
+        extentMax: {width: 0, height: 0},
+        textureTarget: 'GdkDmabufTexture',
+        skipsExternalOnlyModifiers: true,
+        diagnostics: '',
+    };
+
+    try {
+        const relayCapsText = stringFromDisplayConsumer(
+            callDisplayConsumerFunction(DisplayConsumer, 'dmabuf_texture_query_vulkan_relay_caps_json'));
+        if (relayCapsText !== '') {
+            const relayCaps = JSON.parse(relayCapsText);
+            if (relayCaps?.available && Array.isArray(relayCaps.formats) &&
+                relayCaps.formats.length > 0) {
+                caps.backend = 'wayland-gtk4-vulkan-dmabuf-relay-gdk-shadow';
+                caps.probe = String(relayCaps.probe ?? 'vulkan-relay-format-probe');
+                caps.relayModes = ['shadow-copy-v1'];
+                caps.renderNode = String(relayCaps.renderNode ?? '');
+                caps.deviceUuid = String(relayCaps.deviceUuid ?? '');
+                caps.driverUuid = String(relayCaps.driverUuid ?? '');
+                caps.memoryHints = relayCaps.supportsDeviceLocal
+                    ? ['device-local', 'host-visible']
+                    : ['host-visible'];
+                caps.textureTarget = 'VulkanRelayShadowGdkDmabufTexture';
+                caps.skipsExternalOnlyModifiers = false;
+                for (const entry of relayCaps.formats) {
+                    appendUniqueNumber(caps.fourccs, Number(entry.fourcc));
+                    caps.modifiers.push({
+                        fourcc: Number(entry.fourcc),
+                        modifier: String(entry.modifier ?? '0'),
+                        planeCount: Number(entry.planeCount ?? 1),
+                    });
+                }
+                return caps;
+            }
+        }
+    } catch (error) {
+        caps.diagnostics = `vulkan relay caps query failed: ${error.message}`;
+    }
+
+    try {
+        const display = Gdk.Display.get_default();
+        caps.renderNode = stringFromDisplayConsumer(
+            callDisplayConsumerFunction(DisplayConsumer, 'dmabuf_texture_get_render_node', display));
+        caps.deviceUuid = stringFromDisplayConsumer(
+            callDisplayConsumerFunction(DisplayConsumer, 'dmabuf_texture_get_device_uuid', display));
+        caps.driverUuid = stringFromDisplayConsumer(
+            callDisplayConsumerFunction(DisplayConsumer, 'dmabuf_texture_get_driver_uuid', display));
+        caps.vendor = stringFromDisplayConsumer(
+            callDisplayConsumerFunction(DisplayConsumer, 'dmabuf_texture_get_vendor', display));
+        caps.pciAddress = stringFromDisplayConsumer(
+            callDisplayConsumerFunction(DisplayConsumer, 'dmabuf_texture_get_pci_address', display));
+
+        const formats = display?.get_dmabuf_formats?.();
+        const nFormats = formats?.get_n_formats?.() ?? 0;
+        for (let index = 0; index < nFormats; index += 1) {
+            const result = formats.get_format(index);
+            const fourcc = Number(Array.isArray(result) ? result[0] : result?.fourcc ?? result?.format ?? 0);
+            const modifier = Array.isArray(result) ? result[1] : result?.modifier ?? '0';
+            if (!fourcc) {
+                continue;
+            }
+
+            appendUniqueNumber(caps.fourccs, fourcc);
+            caps.modifiers.push({
+                fourcc,
+                modifier: String(modifier),
+                planeCount: 1,
+            });
+        }
+
+        if (caps.fourccs.length > 0) {
+            caps.probe = caps.renderNode
+                ? 'gdk-display-dmabuf-formats'
+                : 'gdk-display-dmabuf-formats-no-render-node';
+            caps.memoryHints = ['host-visible'];
+            caps.skipsExternalOnlyModifiers = false;
+        } else if (caps.diagnostics === '') {
+            caps.probe = 'probe-empty';
+            caps.diagnostics = 'GDK display reported no DMA-BUF formats';
+        }
+    } catch (error) {
+        caps.probe = caps.probe === 'unprobed' ? 'probe-failed' : caps.probe;
+        caps.diagnostics = `GDK DMA-BUF query failed: ${error.message}`;
+    }
+
+    return caps;
+}
+
 function runLayerShellConsumer(options) {
     const LayerShell = importLayerShell();
     if (LayerShell === null) {
         return LAYER_SHELL_REQUIRED ? 1 : 0;
+    }
+    const DisplayConsumer = loadDisplayConsumer();
+    if (DisplayConsumer === null) {
+        return 1;
     }
 
     const Gtk = imports.gi.Gtk;
@@ -115,24 +267,44 @@ function runLayerShellConsumer(options) {
         return 1;
     }
 
+    const presenters = [];
     for (let index = 0; index < monitors.length; index += 1) {
         const output = OutputModel.outputRegistrationFromGdkMonitor(monitors[index], index, {
             compositor: options.compositor,
         });
         print(`Prepared output registration: ${JSON.stringify(output)}`);
+        presenters.push(new DisplayConnection.WaylandOutputPresenter(surfaces[index], output, {
+            DisplayConsumer,
+        }));
     }
 
     print(`Created ${monitors.length} Wayland layer-shell wallpaper surface(s).`);
 
+    const dmabufCaps = buildDmaBufCaps(DisplayConsumer, Gdk);
+    print(`Prepared DMA-BUF caps: ${JSON.stringify(dmabufCaps)}`);
+
+    const displayConnection = new DisplayConnection.DisplaySocketClient({
+        socketPath: options.socketPath,
+        outputs: presenters,
+        pointerEventsEnabled: options.pointerEventsEnabled,
+        compositor: options.compositor,
+        dmabufCaps,
+        DisplayConsumer,
+        log: message => printerr(`Vivid Wayland Consumer: ${message}`),
+    });
+    displayConnection.start();
+
     const loop = new GLib.MainLoop(null, false);
     if (options.exitAfterMs !== undefined) {
         GLib.timeout_add(GLib.PRIORITY_DEFAULT, options.exitAfterMs, () => {
+            displayConnection.stop();
             loop.quit();
             return GLib.SOURCE_REMOVE;
         });
     }
 
     loop.run();
+    displayConnection.stop();
     return 0;
 }
 
