@@ -207,6 +207,23 @@ function closeFrameFdList(DisplayConsumer, fdList) {
     }
 }
 
+function signalReleaseSyncobj(DisplayConsumer, generation, releaseFd) {
+    if (!Number.isFinite(releaseFd) || releaseFd < 0) {
+        return;
+    }
+
+    const renderNode = generation?.payload?.['render-node'] ??
+        generation?.payload?.renderNode ?? '';
+    try {
+        const signalFn = DisplayConsumer?.dmabuf_texture_signal_release_syncobj;
+        if (typeof signalFn === 'function') {
+            signalFn(renderNode, releaseFd);
+        }
+    } catch (error) {
+        printerr(`Vivid Wayland Consumer: release syncobj signal failed: ${error}`);
+    }
+}
+
 function transformCode(value) {
     if (Number.isFinite(Number(value))) {
         return Number(value);
@@ -313,10 +330,6 @@ var DisplayConnectionState = class DisplayConnectionState {
         this._outputsByBackendId = new Map();
         for (const output of outputs) {
             this._outputsByConsumerId.set(Number(output.consumerOutputId ?? output.monitorIndex ?? 0), output);
-        }
-
-        if (options.connected) {
-            this.onConnected();
         }
     }
 
@@ -568,11 +581,13 @@ var WaylandOutputPresenter = class WaylandOutputPresenter {
         }
         if (acquireFd < 0 || releaseFd < 0) {
             closeDisplayConsumerFd(this.DisplayConsumer, acquireFd);
+            signalReleaseSyncobj(this.DisplayConsumer, generation, releaseFd);
             closeDisplayConsumerFd(this.DisplayConsumer, releaseFd);
             return;
         }
         if (!generation.configured) {
             closeDisplayConsumerFd(this.DisplayConsumer, acquireFd);
+            signalReleaseSyncobj(this.DisplayConsumer, generation, releaseFd);
             closeDisplayConsumerFd(this.DisplayConsumer, releaseFd);
             return;
         }
@@ -596,6 +611,7 @@ var WaylandOutputPresenter = class WaylandOutputPresenter {
                 if (typeof waitFn === 'function' &&
                     waitFn(acquireFd, FRAME_SYNC_WAIT_TIMEOUT_MSEC) !== true) {
                     closeDisplayConsumerFd(this.DisplayConsumer, acquireFd);
+                    signalReleaseSyncobj(this.DisplayConsumer, generation, releaseFd);
                     closeDisplayConsumerFd(this.DisplayConsumer, releaseFd);
                     acquireFd = -1;
                     releaseFd = -1;
@@ -610,6 +626,7 @@ var WaylandOutputPresenter = class WaylandOutputPresenter {
             this._currentGeneration = Number(frame.generation);
             this._lastFrameUsec = GLib.get_monotonic_time();
         } catch (error) {
+            signalReleaseSyncobj(this.DisplayConsumer, generation, releaseFd);
             this._reportBindFailed(generation.payload, error, 2, frame.bufferIndex);
             this.unbindGeneration(frame.generation, {logMissing: false, logSuccess: false});
         } finally {
@@ -720,14 +737,23 @@ var DisplaySocketClient = class DisplaySocketClient {
     }
 
     rebuildTopology(outputs) {
-        this._state.rebuildTopology(outputs, {connected: this._connection !== null});
+        const wasConnected = this._connection !== null;
+        if (wasConnected) {
+            this._closeConnection(false);
+        }
+
+        this._state.rebuildTopology(outputs, {
+            clearExisting: !wasConnected,
+        });
         for (const output of outputs) {
             output.setBindFailedReporter?.(payload => {
                 this._state.queueBindFailed(payload);
                 this._drainStateQueue();
             });
         }
-        this._drainStateQueue();
+        if (wasConnected) {
+            this._scheduleReconnect();
+        }
     }
 
     _connect() {
