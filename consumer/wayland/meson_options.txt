@@ -1,0 +1,6 @@
+option(
+  'layer_shell',
+  type: 'feature',
+  value: 'enabled',
+  description: 'Require gtk4-layer-shell-0 at build time; disable only for probe-only environments without the layer-shell development package'
+)

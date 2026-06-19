@@ -8,8 +8,8 @@ REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 usage() {
     cat <<'EOF'
 Usage:
-  tools/vivid.sh build {direct-run|gnome|kde|flatpak|all}
-  tools/vivid.sh clean {direct-run|gnome|kde|flatpak|producer|consumer|all}
+  tools/vivid.sh build {direct-run|gnome|kde|wayland|flatpak|all}
+  tools/vivid.sh clean {direct-run|gnome|kde|wayland|flatpak|producer|consumer|all}
   tools/vivid.sh completion bash
 
   tools/vivid.sh direct-run {build|clean}
@@ -19,6 +19,7 @@ Usage:
 
   tools/vivid.sh gnome {build|clean|install|zip|enable|disable|reset|uninstall|log}
   tools/vivid.sh kde {build|clean|install|zip|uninstall|log}
+  tools/vivid.sh wayland {build|clean|run}
 
   tools/vivid.sh flatpak prefetch
   tools/vivid.sh flatpak {build|clean}
@@ -27,6 +28,7 @@ Usage:
 Aliases:
   tools/vivid.sh consumer gnome ...
   tools/vivid.sh consumer kde ...
+  tools/vivid.sh consumer wayland ...
   tools/vivid.sh producer build-direct-run
   tools/vivid.sh producer run-direct-run
   tools/vivid.sh producer prefetch
@@ -48,12 +50,13 @@ _vivid_sh_completion() {
     cur="${COMP_WORDS[COMP_CWORD]}"
     COMPREPLY=()
 
-    local top_commands="build clean direct-run gnome consumer-gnome kde consumer-kde consumer flatpak producer completion help -h --help"
-    local build_targets="direct-run producer gnome consumer-gnome kde consumer-kde flatpak all"
-    local clean_targets="direct-run gnome consumer-gnome kde consumer-kde flatpak producer consumer all"
+    local top_commands="build clean direct-run gnome consumer-gnome kde consumer-kde wayland consumer-wayland consumer flatpak producer completion help -h --help"
+    local build_targets="direct-run producer gnome consumer-gnome kde consumer-kde wayland consumer-wayland flatpak all"
+    local clean_targets="direct-run gnome consumer-gnome kde consumer-kde wayland consumer-wayland flatpak producer consumer all"
     local direct_run_actions="build clean run run-producer run-webui"
     local gnome_actions="build clean install zip enable disable reset uninstall log"
     local kde_actions="build clean install zip uninstall log"
+    local wayland_actions="build clean run"
     local flatpak_actions="prefetch build clean run-appdir"
     local producer_actions="build-direct-run run-direct-run run-direct-run-producer run-direct-run-webui prefetch build-flatpak run-flatpak-appdir clean-direct-run clean-flatpak clean"
 
@@ -96,9 +99,14 @@ _vivid_sh_completion() {
                 _vivid_complete_words "${kde_actions}"
             fi
             ;;
+        wayland|consumer-wayland)
+            if [[ "${COMP_CWORD}" -eq 2 ]]; then
+                _vivid_complete_words "${wayland_actions}"
+            fi
+            ;;
         consumer)
             if [[ "${COMP_CWORD}" -eq 2 ]]; then
-                _vivid_complete_words "gnome kde"
+                _vivid_complete_words "gnome kde wayland"
             elif [[ "${COMP_CWORD}" -eq 3 ]]; then
                 case "${COMP_WORDS[2]}" in
                     gnome)
@@ -106,6 +114,9 @@ _vivid_sh_completion() {
                         ;;
                     kde)
                         _vivid_complete_words "${kde_actions}"
+                        ;;
+                    wayland)
+                        _vivid_complete_words "${wayland_actions}"
                         ;;
                 esac
             fi
@@ -190,6 +201,16 @@ clean_kde_consumer() {
     clean_path "KDE consumer build cache" "${VIVID_KDE_BUILD_ROOT}"
 }
 
+clean_wayland_consumer() {
+    local root_dir
+    root_dir="$(cd "${SCRIPT_DIR}/../consumer/wayland" && pwd)"
+
+    ROOT_DIR="${root_dir}"
+    . "${SCRIPT_DIR}/consumer_wayland/build_env.sh"
+
+    clean_path "Wayland consumer build cache" "${VIVID_WAYLAND_BUILD_ROOT}"
+}
+
 clean_direct_run() {
     local root_dir
     root_dir="$(cd "${SCRIPT_DIR}/../producer" && pwd)"
@@ -244,6 +265,9 @@ run_clean() {
         kde|consumer-kde)
             clean_kde_consumer
             ;;
+        wayland|consumer-wayland)
+            clean_wayland_consumer
+            ;;
         flatpak)
             clean_flatpak
             ;;
@@ -253,11 +277,13 @@ run_clean() {
         consumer)
             clean_gnome_consumer
             clean_kde_consumer
+            clean_wayland_consumer
             ;;
         all)
             clean_producer
             clean_gnome_consumer
             clean_kde_consumer
+            clean_wayland_consumer
             ;;
         *)
             die_usage "unknown clean target: ${target}"
@@ -356,6 +382,9 @@ run_build_group() {
         kde|consumer-kde)
             run_kde build "$@"
             ;;
+        wayland|consumer-wayland)
+            run_wayland build "$@"
+            ;;
         flatpak)
             run_flatpak build "$@"
             ;;
@@ -363,6 +392,7 @@ run_build_group() {
             run_direct_run build "$@"
             build_gnome_consumer
             run_kde build
+            run_wayland build
             ;;
         *)
             die_usage "unknown build target: ${target}"
@@ -386,6 +416,24 @@ run_kde() {
     fi
 
     "${SCRIPT_DIR}/consumer_kde/run.sh" "$@"
+}
+
+run_wayland() {
+    local action="${1:-}"
+    if [[ -z "${action}" ]]; then
+        die_usage "missing Wayland consumer action"
+    fi
+
+    if [[ "${action}" = "clean" ]]; then
+        shift
+        if [[ $# -ne 0 ]]; then
+            die_usage "unexpected Wayland clean arguments: $*"
+        fi
+        clean_wayland_consumer
+        return
+    fi
+
+    "${SCRIPT_DIR}/consumer_wayland/run.sh" "$@"
 }
 
 run_flatpak() {
@@ -485,6 +533,10 @@ case "${1:-help}" in
         shift
         run_kde "$@"
         ;;
+    wayland|consumer-wayland)
+        shift
+        run_wayland "$@"
+        ;;
     consumer)
         shift
         target="${1:-}"
@@ -498,6 +550,9 @@ case "${1:-help}" in
                 ;;
             kde)
                 run_kde "$@"
+                ;;
+            wayland)
+                run_wayland "$@"
                 ;;
             *)
                 die_usage "unknown consumer target: ${target}"
