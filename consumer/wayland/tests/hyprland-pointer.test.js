@@ -37,6 +37,13 @@ function makeConnection(calls) {
     };
 }
 
+function makeIpcReader(responses, calls = []) {
+    return command => {
+        calls.push(command);
+        return responses.shift() ?? null;
+    };
+}
+
 function testParsesJsonCursorPosition() {
     assertDeepEqual(
         HyprlandPointer.parseCursorPosition('{"x":123.5,"y":456}'),
@@ -51,6 +58,19 @@ function testParsesPlainCursorPosition() {
         {x: 123, y: 456},
         'plain cursor position',
     );
+}
+
+function testDefaultIpcReaderUsesInjectedTransportCommand() {
+    const calls = [];
+    const reader = HyprlandPointer.createHyprlandIpcCursorReader({
+        transport(command) {
+            calls.push(command);
+            return '{"x":12,"y":34}';
+        },
+    });
+
+    assertDeepEqual(reader(), {x: 12, y: 34}, 'ipc cursor position');
+    assertDeepEqual(calls, ['j/cursorpos'], 'ipc command');
 }
 
 function testMapsGlobalCursorToOutputLocalMotion() {
@@ -70,7 +90,7 @@ function testMapsGlobalCursorToOutputLocalMotion() {
             logicalHeight: 100,
         }],
         connection: makeConnection(calls),
-        commandRunner: () => ({ok: true, stdout: '{"x":150,"y":25}'}),
+        ipcCursorReader: makeIpcReader([{x: 150, y: 25}]),
         monotonicTimeUsec: () => 777,
     });
 
@@ -101,7 +121,7 @@ function testMapsPresenterRegistrationGeometryAndSendsPresenter() {
                 return true;
             },
         },
-        commandRunner: () => ({ok: true, stdout: '{"x":150,"y":75}'}),
+        ipcCursorReader: makeIpcReader([{x: 150, y: 75}]),
         monotonicTimeUsec: () => 888,
     });
 
@@ -122,9 +142,7 @@ function testIgnoresOutOfOutputCursorPosition() {
             logicalHeight: 100,
         }],
         connection: makeConnection(calls),
-        commandRunner: command => command.endsWith('-j')
-            ? {ok: false, stdout: ''}
-            : {ok: true, stdout: '150, 25'},
+        ipcCursorReader: makeIpcReader([{x: 150, y: 25}]),
         monotonicTimeUsec: () => 777,
     });
 
@@ -143,9 +161,7 @@ function testSuppressesDuplicateCursorPositionOnSameOutput() {
             logicalHeight: 100,
         }],
         connection: makeConnection(calls),
-        commandRunner: command => command.endsWith('-j')
-            ? {ok: false, stdout: ''}
-            : {ok: true, stdout: '10, 20'},
+        ipcCursorReader: makeIpcReader([{x: 10, y: 20}, {x: 10, y: 20}]),
         monotonicTimeUsec: () => 777,
     });
 
@@ -160,9 +176,7 @@ function testUpdatesOutputsAndStopsTimer() {
     const provider = new HyprlandPointer.HyprlandPointerProvider({
         outputs: [],
         connection: makeConnection(calls),
-        commandRunner: command => command.endsWith('-j')
-            ? {ok: false, stdout: ''}
-            : {ok: true, stdout: '10, 20'},
+        ipcCursorReader: makeIpcReader([{x: 10, y: 20}]),
         timer,
     });
 
@@ -182,8 +196,67 @@ function testUpdatesOutputsAndStopsTimer() {
     assertDeepEqual(timer.removed, [99], 'timer removed on stop');
 }
 
+function testRepeatedPollsUsePrimaryIpcReaderWithoutFallback() {
+    const calls = [];
+    const ipcCalls = [];
+    const commandCalls = [];
+    const provider = new HyprlandPointer.HyprlandPointerProvider({
+        outputs: [{
+            outputId: 'DP-1',
+            x: 0,
+            y: 0,
+            logicalWidth: 100,
+            logicalHeight: 100,
+        }],
+        connection: makeConnection(calls),
+        ipcCursorReader: makeIpcReader([{x: 10, y: 20}, {x: 11, y: 20}], ipcCalls),
+        commandRunner: command => {
+            commandCalls.push(command);
+            return {ok: true, stdout: '99, 99'};
+        },
+        monotonicTimeUsec: () => 777,
+    });
+
+    assertEqual(provider.pollOnce(), true, 'first ipc poll sends motion');
+    assertEqual(provider.pollOnce(), true, 'second ipc poll sends motion');
+    assertDeepEqual(ipcCalls, ['j/cursorpos', 'j/cursorpos'], 'primary ipc reader used each poll');
+    assertDeepEqual(commandCalls, [], 'fallback command runner not called on ipc success');
+    assertDeepEqual(calls, [
+        ['DP-1', 10, 20, 777],
+        ['DP-1', 11, 20, 777],
+    ], 'ipc motion calls');
+}
+
+function testFallsBackToHyprctlOnceWhenIpcFails() {
+    const calls = [];
+    const ipcCalls = [];
+    const commandCalls = [];
+    const provider = new HyprlandPointer.HyprlandPointerProvider({
+        outputs: [{
+            outputId: 'DP-1',
+            x: 0,
+            y: 0,
+            logicalWidth: 100,
+            logicalHeight: 100,
+        }],
+        connection: makeConnection(calls),
+        ipcCursorReader: makeIpcReader([null], ipcCalls),
+        commandRunner: command => {
+            commandCalls.push(command);
+            return {ok: true, stdout: '10, 20'};
+        },
+        monotonicTimeUsec: () => 777,
+    });
+
+    assertEqual(provider.pollOnce(), true, 'fallback poll sends motion');
+    assertDeepEqual(ipcCalls, ['j/cursorpos'], 'ipc tried first');
+    assertDeepEqual(commandCalls, ['hyprctl cursorpos'], 'fallback command called once');
+    assertDeepEqual(calls, [['DP-1', 10, 20, 777]], 'fallback motion call');
+}
+
 function testSuppressesRepeatedHyprctlFailureLogs() {
     const logs = [];
+    const commandCalls = [];
     const provider = new HyprlandPointer.HyprlandPointerProvider({
         outputs: [{
             outputId: 'DP-1',
@@ -193,16 +266,21 @@ function testSuppressesRepeatedHyprctlFailureLogs() {
             logicalHeight: 100,
         }],
         connection: makeConnection([]),
-        commandRunner: () => ({
-            ok: false,
-            stdout: '',
-            stderr: "Couldn't set socket timeout (2)",
-        }),
+        ipcCursorReader: makeIpcReader([null, null]),
+        commandRunner: command => {
+            commandCalls.push(command);
+            return {
+                ok: false,
+                stdout: '',
+                stderr: "Couldn't set socket timeout (2)",
+            };
+        },
         log: message => logs.push(message),
     });
 
     assertEqual(provider.pollOnce(), false, 'first failed poll is non-fatal');
     assertEqual(provider.pollOnce(), false, 'second failed poll is non-fatal');
+    assertDeepEqual(commandCalls, ['hyprctl cursorpos'], 'failed fallback disabled after first failure');
     assertDeepEqual(logs, [
         "hyprctl cursorpos failed: Couldn't set socket timeout (2)",
     ], 'identical hyprctl failures are logged once');
@@ -211,10 +289,13 @@ function testSuppressesRepeatedHyprctlFailureLogs() {
 [
     testParsesJsonCursorPosition,
     testParsesPlainCursorPosition,
+    testDefaultIpcReaderUsesInjectedTransportCommand,
     testMapsGlobalCursorToOutputLocalMotion,
     testMapsPresenterRegistrationGeometryAndSendsPresenter,
     testIgnoresOutOfOutputCursorPosition,
     testSuppressesDuplicateCursorPositionOnSameOutput,
     testUpdatesOutputsAndStopsTimer,
+    testRepeatedPollsUsePrimaryIpcReaderWithoutFallback,
+    testFallsBackToHyprctlOnceWhenIpcFails,
     testSuppressesRepeatedHyprctlFailureLogs,
 ].forEach(testCase => testCase());

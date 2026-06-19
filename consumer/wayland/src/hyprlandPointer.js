@@ -1,6 +1,11 @@
+const Gio = imports.gi.Gio;
 const GLib = imports.gi.GLib;
 
 var DEFAULT_POLL_INTERVAL_MS = 33;
+var HYPRLAND_CURSOR_COMMAND = 'j/cursorpos';
+
+const encoder = new TextEncoder();
+const decoder = new TextDecoder();
 
 function parseCursorPosition(text) {
     const trimmed = String(text ?? '').trim();
@@ -45,6 +50,86 @@ function defaultCommandRunner(command) {
             status: -1,
         };
     }
+}
+
+function bytesFromGBytes(bytes) {
+    const data = bytes.get_data();
+    return data instanceof Uint8Array ? data : new Uint8Array(data);
+}
+
+function joinByteChunks(chunks, totalLength) {
+    const joined = new Uint8Array(totalLength);
+    let offset = 0;
+    for (const chunk of chunks) {
+        joined.set(chunk, offset);
+        offset += chunk.length;
+    }
+    return joined;
+}
+
+function defaultHyprlandSocketPath(env = name => GLib.getenv(name)) {
+    const runtimeDir = env('XDG_RUNTIME_DIR');
+    const signature = env('HYPRLAND_INSTANCE_SIGNATURE');
+    if (!runtimeDir || !signature) {
+        return null;
+    }
+
+    return GLib.build_filenamev([runtimeDir, 'hypr', signature, '.socket.sock']);
+}
+
+function readHyprlandIpcCommand(command, options = {}) {
+    const socketPath = options.socketPath || defaultHyprlandSocketPath(options.env);
+    if (!socketPath) {
+        return null;
+    }
+
+    let connection = null;
+    let input = null;
+    let output = null;
+    try {
+        const client = new Gio.SocketClient();
+        connection = client.connect(Gio.UnixSocketAddress.new(socketPath), null);
+        input = connection.get_input_stream();
+        output = connection.get_output_stream();
+        output.write_all(encoder.encode(command), null);
+        output.close(null);
+        output = null;
+
+        const chunks = [];
+        let totalLength = 0;
+        while (true) {
+            const bytes = input.read_bytes(4096, null);
+            if (bytes.get_size() === 0) {
+                break;
+            }
+
+            const chunk = bytesFromGBytes(bytes);
+            chunks.push(chunk);
+            totalLength += chunk.length;
+        }
+
+        return decoder.decode(joinByteChunks(chunks, totalLength));
+    } catch (_error) {
+        return null;
+    } finally {
+        try {
+            output?.close?.(null);
+        } catch (_error) {
+        }
+        try {
+            input?.close?.(null);
+        } catch (_error) {
+        }
+        try {
+            connection?.close?.(null);
+        } catch (_error) {
+        }
+    }
+}
+
+function createHyprlandIpcCursorReader(options = {}) {
+    const transport = options.transport || (command => readHyprlandIpcCommand(command, options));
+    return () => parseCursorPosition(transport(HYPRLAND_CURSOR_COMMAND));
 }
 
 function defaultTimer() {
@@ -96,12 +181,13 @@ var HyprlandPointerProvider = class HyprlandPointerProvider {
         this._outputs = options.outputs || [];
         this._connection = options.connection;
         this._commandRunner = options.commandRunner || defaultCommandRunner;
+        this._ipcCursorReader = options.ipcCursorReader || createHyprlandIpcCursorReader();
         this._timer = options.timer || defaultTimer();
         this._intervalMs = numberOrDefault(options.intervalMs, DEFAULT_POLL_INTERVAL_MS);
         this._monotonicTimeUsec = options.monotonicTimeUsec || defaultMonotonicTimeUsec;
         this._sourceId = 0;
         this._last = null;
-        this._jsonFailed = false;
+        this._fallbackFailed = false;
         this._loggedFailures = new Set();
         this._log = options.log || (_message => {});
     }
@@ -168,19 +254,22 @@ var HyprlandPointerProvider = class HyprlandPointerProvider {
     }
 
     _readCursorPosition() {
-        if (!this._jsonFailed) {
-            const jsonResult = this._commandRunner('hyprctl cursorpos -j');
-            const jsonPosition = jsonResult?.ok ? parseCursorPosition(jsonResult.stdout) : null;
-            if (jsonPosition) {
-                return jsonPosition;
-            }
-            this._jsonFailed = true;
+        const ipcPosition = this._ipcCursorReader?.(HYPRLAND_CURSOR_COMMAND);
+        if (ipcPosition) {
+            return ipcPosition;
+        }
+
+        if (this._fallbackFailed) {
+            return null;
         }
 
         const result = this._commandRunner('hyprctl cursorpos');
         const position = result?.ok ? parseCursorPosition(result.stdout) : null;
-        if (!position && result?.stderr) {
-            this._logFailureOnce('hyprctl cursorpos', result.stderr);
+        if (!position) {
+            if (result?.stderr) {
+                this._logFailureOnce('hyprctl cursorpos', result.stderr);
+            }
+            this._fallbackFailed = true;
         }
         return position;
     }
@@ -198,7 +287,11 @@ var HyprlandPointerProvider = class HyprlandPointerProvider {
 
 var HyprlandPointer = {
     DEFAULT_POLL_INTERVAL_MS,
+    HYPRLAND_CURSOR_COMMAND,
     HyprlandPointerProvider,
+    createHyprlandIpcCursorReader,
+    defaultHyprlandSocketPath,
     parseCursorPosition,
     outputAtPosition,
+    readHyprlandIpcCommand,
 };
