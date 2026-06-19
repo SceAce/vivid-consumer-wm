@@ -13,6 +13,7 @@ const OutputModel = imports.outputModel;
 const LayerShellSurfaces = imports.layerShellSurfaces;
 const DisplayConnection = imports.displayConnection;
 const RuntimeTopology = imports.runtimeTopology;
+const HyprlandPointer = imports.hyprlandPointer;
 
 const LAYER_SHELL_REQUIRED = @layer_shell_required@;
 const DISPLAY_CONSUMER_DIR = GLib.getenv('VIVID_DISPLAY_CONSUMER_DIR') || '';
@@ -26,7 +27,7 @@ Options:
   --socket PATH                  Vivid producer socket path.
   --compositor MODE              Compositor mode: ${RuntimeArgs.SUPPORTED_COMPOSITORS.join(', ')}.
   --no-input                     Do not advertise input features.
-  --enable-pointer-events        Unsupported; pointer forwarding is not implemented.
+  --enable-pointer-events        Forward Hyprland pointer motion without taking input focus.
 
 Normal run connects to the Vivid display-v1 producer socket and presents frames.`);
 }
@@ -236,6 +237,7 @@ function runLayerShellConsumer(options) {
     print(`Prepared DMA-BUF caps: ${JSON.stringify(dmabufCaps)}`);
 
     const display = Gdk.Display.get_default();
+    let pointerProvider = null;
     const topology = new RuntimeTopology.TopologyController({
         display,
         compositor: options.compositor,
@@ -264,6 +266,7 @@ function runLayerShellConsumer(options) {
         },
         outputFromMonitor: (monitor, index, outputOptions) =>
             OutputModel.outputRegistrationFromGdkMonitor(monitor, index, outputOptions),
+        onPresentersChanged: nextPresenters => pointerProvider?.updateOutputs(nextPresenters),
         log: message => printerr(`Vivid Wayland Consumer: ${message}`),
     });
 
@@ -287,9 +290,19 @@ function runLayerShellConsumer(options) {
     displayConnection.start();
     topology.watch(displayConnection);
 
+    pointerProvider = options.pointerEventsEnabled && options.compositor === 'hyprland'
+        ? new HyprlandPointer.HyprlandPointerProvider({
+            outputs: presenters,
+            connection: displayConnection,
+            log: message => printerr(`Vivid Wayland Consumer: ${message}`),
+        })
+        : null;
+    pointerProvider?.start();
+
     const loop = new GLib.MainLoop(null, false);
     if (options.exitAfterMs !== undefined) {
         GLib.timeout_add(GLib.PRIORITY_DEFAULT, options.exitAfterMs, () => {
+            pointerProvider?.stop();
             topology.stop();
             displayConnection.stop();
             loop.quit();
@@ -298,6 +311,7 @@ function runLayerShellConsumer(options) {
     }
 
     loop.run();
+    pointerProvider?.stop();
     topology.stop();
     displayConnection.stop();
     return 0;

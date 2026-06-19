@@ -8,12 +8,14 @@ var FRAME_HEADER_BYTES = 4;
 var FRAME_READY_BODY_BYTES = 36;
 var FRAME_READY_FD_COUNT = 2;
 var UNBIND_BODY_BYTES = 12;
+var POINTER_MOTION_BODY_BYTES = 28;
 var RECONNECT_DELAY_MS = 1000;
 var FRAME_SYNC_WAIT_TIMEOUT_MSEC = 1000;
 
 var REQ_HELLO = 1;
 var REQ_REGISTER_OUTPUT = 2;
 var REQ_CONSUMER_CAPS = 4;
+var REQ_POINTER_MOTION = 7;
 var REQ_BIND_FAILED = 14;
 var REQ_UNBIND_DONE = 15;
 
@@ -81,6 +83,11 @@ function writeUint64LE(bytes, offset, value) {
     const normalized = Math.max(0, Math.floor(Number(value) || 0));
     writeUint32LE(bytes, offset, normalized >>> 0);
     writeUint32LE(bytes, offset + 4, Math.floor(normalized / 0x100000000) >>> 0);
+}
+
+function writeFloat64LE(bytes, offset, value) {
+    const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+    view.setFloat64(offset, Number(value), true);
 }
 
 function encodeFrame(opcode, body = new Uint8Array(0)) {
@@ -163,6 +170,15 @@ function unbindBodyFromPayload(payload = {}) {
     const body = new Uint8Array(UNBIND_BODY_BYTES);
     writeUint32LE(body, 0, Number(payload.outputId ?? 0));
     writeUint64LE(body, 4, Number(payload.generation ?? 0));
+    return body;
+}
+
+function pointerMotionBodyFromPayload(payload = {}) {
+    const body = new Uint8Array(POINTER_MOTION_BODY_BYTES);
+    writeUint32LE(body, 0, Number(payload.outputId ?? 0));
+    writeFloat64LE(body, 4, Number(payload.x ?? 0));
+    writeFloat64LE(body, 12, Number(payload.y ?? 0));
+    writeUint64LE(body, 20, Number(payload.timeUsec ?? 0));
     return body;
 }
 
@@ -394,6 +410,39 @@ var DisplayConnectionState = class DisplayConnectionState {
         });
     }
 
+    queuePointerMotion(output, x, y, timeUsec) {
+        if (!this._options.pointerEventsEnabled) {
+            return false;
+        }
+
+        if (output?.backendOutputId === null || output?.backendOutputId === undefined) {
+            return false;
+        }
+
+        const backendOutputId = Number(output.backendOutputId);
+        if (!Number.isFinite(backendOutputId)) {
+            return false;
+        }
+
+        const scale = numberOrDefault(output.scale, 1) > 0
+            ? numberOrDefault(output.scale, 1)
+            : 1;
+        const payload = {
+            outputId: backendOutputId,
+            x: Number(x) * scale,
+            y: Number(y) * scale,
+            timeUsec,
+        };
+        const bytes = encodeFrame(REQ_POINTER_MOTION, pointerMotionBodyFromPayload(payload));
+        this._queueFrame({
+            opcode: REQ_POINTER_MOTION,
+            payload,
+            bytes,
+            coalesceKey: `pointer-motion:${backendOutputId}`,
+        });
+        return true;
+    }
+
     takeQueuedFrames() {
         const frames = this._queuedFrames;
         this._queuedFrames = [];
@@ -401,11 +450,24 @@ var DisplayConnectionState = class DisplayConnectionState {
     }
 
     _queue(opcode, payload) {
-        this._queuedFrames.push({
+        this._queueFrame({
             opcode,
             payload,
             bytes: encodeJsonFrame(opcode, payload),
         });
+    }
+
+    _queueFrame(frame) {
+        if (frame.coalesceKey !== undefined) {
+            const existingIndex = this._queuedFrames.findIndex(queued =>
+                queued.coalesceKey === frame.coalesceKey);
+            if (existingIndex !== -1) {
+                this._queuedFrames[existingIndex] = frame;
+                return;
+            }
+        }
+
+        this._queuedFrames.push(frame);
     }
 
     _clearImportedOutputState() {
@@ -756,6 +818,14 @@ var DisplaySocketClient = class DisplaySocketClient {
         }
     }
 
+    queuePointerMotion(output, x, y, timeUsec) {
+        const queued = this._state.queuePointerMotion(output, x, y, timeUsec);
+        if (queued) {
+            this._drainStateQueue();
+        }
+        return queued;
+    }
+
     _connect() {
         this._clearReconnect();
         this._socketClient = new Gio.SocketClient();
@@ -814,9 +884,24 @@ var DisplaySocketClient = class DisplaySocketClient {
 
     _drainStateQueue() {
         for (const frame of this._state.takeQueuedFrames()) {
-            this._writeQueue.push(frame.bytes);
+            this._enqueueWriteFrame(frame);
         }
         this._flushWriteQueue();
+    }
+
+    _enqueueWriteFrame(frame) {
+        if (frame.coalesceKey !== undefined) {
+            const searchStart = this._writePending ? 1 : 0;
+            const existingIndex = this._writeQueue.findIndex((queued, index) =>
+                index >= searchStart &&
+                queued.coalesceKey === frame.coalesceKey);
+            if (existingIndex !== -1) {
+                this._writeQueue[existingIndex] = frame;
+                return;
+            }
+        }
+
+        this._writeQueue.push(frame);
     }
 
     _flushWriteQueue() {
@@ -824,7 +909,8 @@ var DisplaySocketClient = class DisplaySocketClient {
             return;
         }
 
-        const bytes = this._writeQueue[0];
+        const frame = this._writeQueue[0];
+        const bytes = frame.bytes;
         this._writePending = true;
         this._output.write_all_async(bytes, GLib.PRIORITY_DEFAULT, this._cancellable, (stream, result) => {
             if (stream !== this._output) {
@@ -904,6 +990,7 @@ var DisplayConnection = {
     REQ_HELLO,
     REQ_REGISTER_OUTPUT,
     REQ_CONSUMER_CAPS,
+    REQ_POINTER_MOTION,
     REQ_BIND_FAILED,
     REQ_UNBIND_DONE,
     EVT_WELCOME,
@@ -923,6 +1010,7 @@ var DisplayConnection = {
     decodeUnbindBody,
     frameReadyBodyFromPayload,
     unbindBodyFromPayload,
+    pointerMotionBodyFromPayload,
     WaylandOutputPresenter,
     DisplaySocketClient,
 };

@@ -86,6 +86,15 @@ test(
 )
 
 test(
+  'hyprland-pointer',
+  gjs,
+  args: files('tests/hyprland-pointer.test.js'),
+  env: [
+    'GJS_PATH=' + meson.current_source_dir() / 'src',
+  ],
+)
+
+test(
   'runtime-topology',
   gjs,
   args: files('tests/runtime-topology.test.js'),

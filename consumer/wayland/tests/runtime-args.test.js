@@ -73,11 +73,99 @@ function testInputDisabledByDefault() {
     assertEqual(options.pointerEventsEnabled, false, 'pointer events default');
 }
 
-function testPointerFeatureAdvertisementIsRejectedUntilForwardingExists() {
+function testPointerFeatureAdvertisementIsAcceptedForHyprland() {
+    const options = RuntimeArgs.parseRuntimeArgs([
+        '--compositor', 'hyprland',
+        '--enable-pointer-events',
+    ], {
+        runtimeDir: '/run/user/1000',
+    });
+
+    assertEqual(options.pointerEventsEnabled, true, 'hyprland pointer events enabled');
+}
+
+function testPointerFeatureAdvertisementUsesAutoDetectedHyprland() {
+    const options = RuntimeArgs.parseRuntimeArgs(['--enable-pointer-events'], {
+        runtimeDir: '/run/user/1000',
+        env(name) {
+            return name === 'HYPRLAND_INSTANCE_SIGNATURE' ? 'test-hyprland' : null;
+        },
+    });
+
+    assertEqual(options.compositor, 'hyprland', 'auto-detected compositor mode');
+    assertEqual(options.pointerEventsEnabled, true, 'auto-detected pointer events enabled');
+}
+
+function testExplicitAutoPointerFeatureAdvertisementUsesAutoDetectedHyprland() {
+    const options = RuntimeArgs.parseRuntimeArgs([
+        '--compositor', 'auto',
+        '--enable-pointer-events',
+    ], {
+        runtimeDir: '/run/user/1000',
+        env(name) {
+            return name === 'HYPRLAND_INSTANCE_SIGNATURE' ? 'test-hyprland' : null;
+        },
+    });
+
+    assertEqual(options.compositor, 'hyprland', 'explicit auto-detected compositor mode');
+    assertEqual(options.pointerEventsEnabled, true, 'explicit auto-detected pointer events enabled');
+}
+
+function testNoInputDisablesPointerEvents() {
+    const options = RuntimeArgs.parseRuntimeArgs([
+        '--compositor', 'hyprland',
+        '--enable-pointer-events',
+        '--no-input',
+    ], {
+        runtimeDir: '/run/user/1000',
+    });
+
+    assertEqual(options.pointerEventsEnabled, false, 'no-input disables pointer events');
+}
+
+function testNoInputDisablesPointerEventsRegardlessOfArgumentOrder() {
+    const options = RuntimeArgs.parseRuntimeArgs([
+        '--compositor', 'hyprland',
+        '--no-input',
+        '--enable-pointer-events',
+    ], {
+        runtimeDir: '/run/user/1000',
+    });
+
+    assertEqual(options.pointerEventsEnabled, false, 'no-input disables later pointer events flag');
+}
+
+function testPointerFeatureAdvertisementIsAcceptedButDisabledForGenericAndNiri() {
+    for (const compositor of ['generic', 'niri']) {
+        const options = RuntimeArgs.parseRuntimeArgs([
+            '--compositor', compositor,
+            '--enable-pointer-events',
+        ], {runtimeDir: '/run/user/1000'});
+
+        assertEqual(options.pointerEventsEnabled, false, `${compositor} pointer events disabled`);
+    }
+}
+
+function testPointerFeatureAdvertisementIsAcceptedButDisabledForUndetectedAutoMode() {
+    const options = RuntimeArgs.parseRuntimeArgs(['--enable-pointer-events'], {
+        runtimeDir: '/run/user/1000',
+        env() {
+            return null;
+        },
+    });
+
+    assertEqual(options.compositor, 'auto', 'undetected auto compositor mode');
+    assertEqual(options.pointerEventsEnabled, false, 'undetected auto pointer events disabled');
+}
+
+function testInvalidCompositorModeStillFailsWithPointerFlag() {
     assertThrows(
-        () => RuntimeArgs.parseRuntimeArgs(['--enable-pointer-events'], {runtimeDir: '/run/user/1000'}),
-        '--enable-pointer-events is not supported yet; pointer forwarding is not implemented',
-        'unsupported pointer events flag',
+        () => RuntimeArgs.parseRuntimeArgs([
+            '--compositor', 'sway',
+            '--enable-pointer-events',
+        ], {runtimeDir: '/run/user/1000'}),
+        'Unsupported compositor mode: sway',
+        'invalid compositor mode with pointer flag',
     );
 }
 
@@ -140,7 +228,14 @@ function testUnknownArgumentFails() {
     testDefaultCompositorMode,
     testSupportedCompositorModes,
     testInputDisabledByDefault,
-    testPointerFeatureAdvertisementIsRejectedUntilForwardingExists,
+    testPointerFeatureAdvertisementIsAcceptedForHyprland,
+    testPointerFeatureAdvertisementUsesAutoDetectedHyprland,
+    testExplicitAutoPointerFeatureAdvertisementUsesAutoDetectedHyprland,
+    testNoInputDisablesPointerEvents,
+    testNoInputDisablesPointerEventsRegardlessOfArgumentOrder,
+    testPointerFeatureAdvertisementIsAcceptedButDisabledForGenericAndNiri,
+    testPointerFeatureAdvertisementIsAcceptedButDisabledForUndetectedAutoMode,
+    testInvalidCompositorModeStillFailsWithPointerFlag,
     testHiddenExitAfterMsOption,
     testInvalidExitAfterMsFails,
     testMissingSocketPathFails,

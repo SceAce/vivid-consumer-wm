@@ -10,8 +10,15 @@ function defaultSocketPath(runtimeDir) {
     return `${runtimeDir}/vivid/display-v1.sock`;
 }
 
+function detectCompositor(env = GLib.getenv) {
+    return env('HYPRLAND_INSTANCE_SIGNATURE') ? 'hyprland' : 'auto';
+}
+
 function parseRuntimeArgs(argv, options = {}) {
     const runtimeDir = options.runtimeDir || defaultRuntimeDir();
+    const env = options.env || GLib.getenv;
+    let pointerEventsRequested = false;
+    let noInputRequested = false;
     const parsed = {
         socketPath: defaultSocketPath(runtimeDir),
         compositor: 'auto',
@@ -38,9 +45,12 @@ function parseRuntimeArgs(argv, options = {}) {
             }
             parsed.compositor = compositor;
         } else if (arg === '--no-input') {
+            noInputRequested = true;
+            pointerEventsRequested = false;
             parsed.pointerEventsEnabled = false;
         } else if (arg === '--enable-pointer-events') {
-            throw new Error('--enable-pointer-events is not supported yet; pointer forwarding is not implemented');
+            pointerEventsRequested = true;
+            parsed.pointerEventsEnabled = true;
         } else if (arg === '--exit-after-ms') {
             index += 1;
             if (index >= argv.length) {
@@ -56,10 +66,16 @@ function parseRuntimeArgs(argv, options = {}) {
         }
     }
 
+    if (pointerEventsRequested && !noInputRequested && parsed.compositor === 'auto') {
+        parsed.compositor = detectCompositor(env);
+    }
+    parsed.pointerEventsEnabled = pointerEventsRequested && !noInputRequested && parsed.compositor === 'hyprland';
+
     return parsed;
 }
 
 var RuntimeArgs = {
     SUPPORTED_COMPOSITORS,
+    detectCompositor,
     parseRuntimeArgs,
 };

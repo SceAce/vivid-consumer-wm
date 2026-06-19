@@ -13,7 +13,11 @@ var BASE_CONSUMER_FEATURES = [
 var DEFAULT_RENDERER = 'gtk4-gdk-wayland';
 
 function consumerFeatures(_options = {}) {
-    return [...BASE_CONSUMER_FEATURES];
+    const features = [...BASE_CONSUMER_FEATURES];
+    if (_options.pointerEventsEnabled) {
+        features.push('pointer-events-v1');
+    }
+    return features;
 }
 
 function buildHelloPayload(options = {}) {
@@ -35,7 +39,7 @@ function buildConsumerCapsPayload(options = {}) {
             renderer: options.renderer || DEFAULT_RENDERER,
         }],
         explicitSync: true,
-        pointerEvents: false,
+        pointerEvents: Boolean(options.pointerEventsEnabled),
     };
 
     if (options.dmabufCaps !== undefined) {

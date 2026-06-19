@@ -20,12 +20,33 @@ function assertIncludes(values, expected, message) {
     }
 }
 
+function readUint16LE(bytes, offset) {
+    return bytes[offset] | (bytes[offset + 1] << 8);
+}
+
+function readUint32LE(bytes, offset) {
+    return (bytes[offset] |
+        (bytes[offset + 1] << 8) |
+        (bytes[offset + 2] << 16) |
+        (bytes[offset + 3] << 24)) >>> 0;
+}
+
+function readUint64LE(bytes, offset) {
+    return readUint32LE(bytes, offset) + readUint32LE(bytes, offset + 4) * 0x100000000;
+}
+
+function readFloat64LE(bytes, offset) {
+    const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+    return view.getFloat64(offset, true);
+}
+
 function makeOutput(outputId, consumerOutputId = 0) {
     const calls = [];
     return {
         outputId,
         consumerOutputId,
         monitorIndex: consumerOutputId,
+        scale: 1,
         calls,
         backendOutputId: null,
         clear() {
@@ -257,6 +278,158 @@ function testProducerEventsDispatchToOutputImportPath() {
     ], 'event dispatch order');
 }
 
+function testPointerMotionQueuesScaledBinaryFrameForAcceptedOutput() {
+    const output = makeOutput('DP-1', 0);
+    output.scale = 1.5;
+    const state = DisplayConnection.createConnectionState({
+        outputs: [output],
+        pointerEventsEnabled: true,
+    });
+    state.dispatchEvent('EVT_OUTPUT_ACCEPTED', {
+        consumerOutputId: 0,
+        outputId: 17,
+    });
+
+    const queued = state.queuePointerMotion(output, 10, 20, 123456789);
+
+    assertEqual(queued, true, 'pointer motion queued');
+    const frames = state.takeQueuedFrames();
+    assertEqual(frames.length, 1, 'pointer motion frame count');
+    assertEqual(frames[0].opcode, DisplayConnection.REQ_POINTER_MOTION, 'pointer motion opcode');
+    assertEqual(readUint16LE(frames[0].bytes, 0), 7, 'encoded pointer motion opcode');
+    assertEqual(readUint16LE(frames[0].bytes, 2), 32, 'encoded pointer motion frame length');
+    assertEqual(readUint32LE(frames[0].bytes, 4), 17, 'pointer motion backend output id');
+    assertEqual(readFloat64LE(frames[0].bytes, 8), 15, 'pointer motion scaled x');
+    assertEqual(readFloat64LE(frames[0].bytes, 16), 30, 'pointer motion scaled y');
+    assertEqual(readUint64LE(frames[0].bytes, 24), 123456789, 'pointer motion time usec');
+}
+
+function testPointerMotionIgnoresOutputWithoutBackendId() {
+    const output = makeOutput('DP-1', 0);
+    const state = DisplayConnection.createConnectionState({
+        outputs: [output],
+        pointerEventsEnabled: true,
+    });
+
+    const queued = state.queuePointerMotion(output, 10, 20, 123456789);
+
+    assertEqual(queued, false, 'pointer motion ignored without backend id');
+    assertDeepEqual(state.takeQueuedFrames(), [], 'no queued pointer motion frames');
+}
+
+function testClientQueuesPointerMotionThroughState() {
+    const output = makeOutput('DP-1', 0);
+    const state = DisplayConnection.createConnectionState({
+        outputs: [output],
+        pointerEventsEnabled: true,
+    });
+    const client = new DisplayConnection.DisplaySocketClient({
+        socketPath: '/tmp/vivid-test.sock',
+        state,
+        DisplayConsumer: {Receiver: {new() { throw new Error('unused'); }}},
+        log() {},
+    });
+    const writes = [];
+    client._output = {
+        write_all_async(bytes) {
+            writes.push(bytes);
+        },
+    };
+    state.dispatchEvent('EVT_OUTPUT_ACCEPTED', {
+        consumerOutputId: 0,
+        outputId: 17,
+    });
+
+    const queued = client.queuePointerMotion(output, 10, 20, 123456789);
+
+    assertEqual(queued, true, 'client pointer motion queued');
+    assertEqual(writes.length, 1, 'client wrote pointer motion frame');
+    assertEqual(readUint16LE(writes[0], 0), 7, 'client pointer motion opcode');
+}
+
+function testClientCoalescesOnlyPendingPointerMotionFrames() {
+    const output = makeOutput('DP-1', 0);
+    const state = DisplayConnection.createConnectionState({
+        outputs: [output],
+        pointerEventsEnabled: true,
+    });
+    const client = new DisplayConnection.DisplaySocketClient({
+        socketPath: '/tmp/vivid-test.sock',
+        state,
+        DisplayConsumer: {Receiver: {new() { throw new Error('unused'); }}},
+        log() {},
+    });
+    let pendingCallback = null;
+    const writes = [];
+    client._output = {
+        write_all_async(bytes, priority, cancellable, callback) {
+            writes.push(bytes);
+            pendingCallback = callback;
+        },
+        write_all_finish() {},
+    };
+    state.dispatchEvent('EVT_OUTPUT_ACCEPTED', {
+        consumerOutputId: 0,
+        outputId: 17,
+    });
+
+    client.queuePointerMotion(output, 1, 1, 100);
+    client.queuePointerMotion(output, 2, 2, 200);
+    client.queuePointerMotion(output, 3, 3, 300);
+    pendingCallback(client._output, {});
+
+    assertEqual(writes.length, 2, 'in-flight plus coalesced pending write count');
+    assertEqual(readFloat64LE(writes[0], 8), 1, 'in-flight pointer x is preserved');
+    assertEqual(readFloat64LE(writes[1], 8), 3, 'pending pointer x is coalesced to latest');
+    assertEqual(readUint64LE(writes[1], 24), 300, 'pending pointer time is coalesced to latest');
+}
+
+function testClientCoalescesPointerMotionPerBackendOutput() {
+    const firstOutput = makeOutput('DP-1', 0);
+    const secondOutput = makeOutput('HDMI-A-1', 1);
+    const state = DisplayConnection.createConnectionState({
+        outputs: [firstOutput, secondOutput],
+        pointerEventsEnabled: true,
+    });
+    const client = new DisplayConnection.DisplaySocketClient({
+        socketPath: '/tmp/vivid-test.sock',
+        state,
+        DisplayConsumer: {Receiver: {new() { throw new Error('unused'); }}},
+        log() {},
+    });
+    let pendingCallback = null;
+    const writes = [];
+    client._output = {
+        write_all_async(bytes, priority, cancellable, callback) {
+            writes.push(bytes);
+            pendingCallback = callback;
+        },
+        write_all_finish() {},
+    };
+    state.dispatchEvent('EVT_OUTPUT_ACCEPTED', {
+        consumerOutputId: 0,
+        outputId: 17,
+    });
+    state.dispatchEvent('EVT_OUTPUT_ACCEPTED', {
+        consumerOutputId: 1,
+        outputId: 22,
+    });
+
+    client.queuePointerMotion(firstOutput, 1, 1, 100);
+    client.queuePointerMotion(firstOutput, 2, 2, 200);
+    client.queuePointerMotion(secondOutput, 5, 5, 500);
+    client.queuePointerMotion(firstOutput, 3, 3, 300);
+    pendingCallback(client._output, {});
+    pendingCallback(client._output, {});
+
+    assertEqual(writes.length, 3, 'in-flight plus one pending frame per output');
+    assertEqual(readUint32LE(writes[0], 4), 17, 'in-flight backend output id');
+    assertEqual(readUint32LE(writes[1], 4), 17, 'coalesced first backend output id');
+    assertEqual(readFloat64LE(writes[1], 8), 3, 'coalesced first backend x');
+    assertEqual(readUint32LE(writes[2], 4), 22, 'second backend output id');
+    assertEqual(readFloat64LE(writes[2], 8), 5, 'second backend x');
+}
+
 function testRejectedFrameSignalsReleaseSyncobjBeforeCloseWhenConfigIsPending() {
     const DisplayConsumer = makeDisplayConsumerFake();
     const presenter = new DisplayConnection.WaylandOutputPresenter({
@@ -388,6 +561,11 @@ function testRejectedFrameSignalsReleaseSyncobjBeforeCloseWhenPaintableRefreshFa
     testTopologyRebuildClearsOutputsBeforeReconnect,
     testConnectedRuntimeTopologyRebuildReconnectsBeforeReplayingHandshake,
     testProducerEventsDispatchToOutputImportPath,
+    testPointerMotionQueuesScaledBinaryFrameForAcceptedOutput,
+    testPointerMotionIgnoresOutputWithoutBackendId,
+    testClientQueuesPointerMotionThroughState,
+    testClientCoalescesOnlyPendingPointerMotionFrames,
+    testClientCoalescesPointerMotionPerBackendOutput,
     testRejectedFrameSignalsReleaseSyncobjBeforeCloseWhenConfigIsPending,
     testRejectedFrameSignalsReleaseSyncobjBeforeCloseWhenAcquireWaitFails,
     testRejectedFrameSignalsReleaseSyncobjBeforeCloseWhenPaintableRefreshFails,

@@ -20,6 +20,7 @@ var TopologyController = class TopologyController {
         this._destroySurfaces = options.destroySurfaces;
         this._createPresenter = options.createPresenter;
         this._outputFromMonitor = options.outputFromMonitor;
+        this._onPresentersChanged = options.onPresentersChanged || null;
         this._log = options.log || (_message => {});
         this._surfaces = [];
         this._presenters = [];
@@ -48,6 +49,7 @@ var TopologyController = class TopologyController {
     rebuildForTopologyChange() {
         const presenters = this._rebuild({allowEmpty: true});
         this._connection?.rebuildTopology?.(presenters);
+        this._onPresentersChanged?.(presenters);
         return presenters;
     }
 
