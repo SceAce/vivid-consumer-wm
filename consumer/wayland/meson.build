@@ -86,9 +86,9 @@ test(
 )
 
 test(
-  'hyprland-pointer',
+  'fd-debug',
   gjs,
-  args: files('tests/hyprland-pointer.test.js'),
+  args: files('tests/fd-debug.test.js'),
   env: [
     'GJS_PATH=' + meson.current_source_dir() / 'src',
   ],

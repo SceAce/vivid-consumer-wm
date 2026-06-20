@@ -1,0 +1,3 @@
+option('hyprland_include_dir', type: 'string', value: '/usr/include/hyprland', description: 'Installed Hyprland header root')
+option('required_hash', type: 'string', value: '', description: 'Required Hyprland ABI hash. Empty means use compiled client hash.')
+option('default_socket', type: 'string', value: '', description: 'Default Vivid display-v1 socket path. Empty means $XDG_RUNTIME_DIR/vivid/display-v1.sock.')

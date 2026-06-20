@@ -13,7 +13,7 @@ const OutputModel = imports.outputModel;
 const LayerShellSurfaces = imports.layerShellSurfaces;
 const DisplayConnection = imports.displayConnection;
 const RuntimeTopology = imports.runtimeTopology;
-const HyprlandPointer = imports.hyprlandPointer;
+const FdDebug = imports.fdDebug;
 
 const LAYER_SHELL_REQUIRED = @layer_shell_required@;
 const DISPLAY_CONSUMER_DIR = GLib.getenv('VIVID_DISPLAY_CONSUMER_DIR') || '';
@@ -235,9 +235,11 @@ function runLayerShellConsumer(options) {
 
     const dmabufCaps = buildDmaBufCaps(DisplayConsumer, Gdk);
     print(`Prepared DMA-BUF caps: ${JSON.stringify(dmabufCaps)}`);
+    if (options.requiresHyprlandPlugin) {
+        printerr('Vivid Wayland Consumer: --enable-pointer-events requires the vivid Hyprland plugin; internal Hyprland cursor polling is disabled.');
+    }
 
     const display = Gdk.Display.get_default();
-    let pointerProvider = null;
     const topology = new RuntimeTopology.TopologyController({
         display,
         compositor: options.compositor,
@@ -266,7 +268,6 @@ function runLayerShellConsumer(options) {
         },
         outputFromMonitor: (monitor, index, outputOptions) =>
             OutputModel.outputRegistrationFromGdkMonitor(monitor, index, outputOptions),
-        onPresentersChanged: nextPresenters => pointerProvider?.updateOutputs(nextPresenters),
         log: message => printerr(`Vivid Wayland Consumer: ${message}`),
     });
 
@@ -287,33 +288,28 @@ function runLayerShellConsumer(options) {
         DisplayConsumer,
         log: message => printerr(`Vivid Wayland Consumer: ${message}`),
     });
+    const fdDebugMonitor = new FdDebug.FdDebugMonitor({
+        log: message => printerr(`Vivid Wayland Consumer: ${message}`),
+    });
     displayConnection.start();
     topology.watch(displayConnection);
-
-    pointerProvider = options.pointerEventsEnabled && options.compositor === 'hyprland'
-        ? new HyprlandPointer.HyprlandPointerProvider({
-            outputs: presenters,
-            connection: displayConnection,
-            log: message => printerr(`Vivid Wayland Consumer: ${message}`),
-        })
-        : null;
-    pointerProvider?.start();
+    fdDebugMonitor.start();
 
     const loop = new GLib.MainLoop(null, false);
     if (options.exitAfterMs !== undefined) {
         GLib.timeout_add(GLib.PRIORITY_DEFAULT, options.exitAfterMs, () => {
-            pointerProvider?.stop();
             topology.stop();
             displayConnection.stop();
+            fdDebugMonitor.stop();
             loop.quit();
             return GLib.SOURCE_REMOVE;
         });
     }
 
     loop.run();
-    pointerProvider?.stop();
     topology.stop();
     displayConnection.stop();
+    fdDebugMonitor.stop();
     return 0;
 }
 

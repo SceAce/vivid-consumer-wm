@@ -1,4 +1,5 @@
 const DisplayConnection = imports.displayConnection;
+const GLib = imports.gi.GLib;
 
 function assertEqual(actual, expected, message) {
     if (actual !== expected) {
@@ -130,8 +131,66 @@ function makeFdList(fds) {
     };
 }
 
+function makeOwnedFdList(ownedFds, duplicateFds = []) {
+    const state = {
+        ownedFds: ownedFds.slice(),
+        duplicateFds: duplicateFds.slice(),
+        getCalls: [],
+        stealCalls: 0,
+    };
+    return {
+        state,
+        get_length() {
+            return state.ownedFds.length;
+        },
+        get(index) {
+            state.getCalls.push(index);
+            return state.duplicateFds[index] ?? -1;
+        },
+        steal_fds() {
+            state.stealCalls += 1;
+            const stolen = state.ownedFds;
+            state.ownedFds = [];
+            return stolen;
+        },
+    };
+}
+
+function makeGBytesFake(bytes) {
+    return {
+        get_data() {
+            return bytes;
+        },
+    };
+}
+
+function makeOutputMapWriterFake() {
+    const calls = [];
+    return {
+        calls,
+        write(outputs) {
+            calls.push(outputs.map(output => ({
+                monitorName: output.monitorName,
+                outputId: output.outputId,
+            })));
+        },
+    };
+}
+
 function queuedTypes(state) {
     return state.takeQueuedFrames().map(frame => frame.payload.type);
+}
+
+function makeStartedClient(state, DisplayConsumer) {
+    const client = new DisplayConnection.DisplaySocketClient({
+        socketPath: '/tmp/vivid-test.sock',
+        state,
+        DisplayConsumer,
+        log() {},
+    });
+    client._connection = {};
+    client._startReceiver();
+    return client;
 }
 
 function testStartupQueuesHelloCapsThenOutputRegistration() {
@@ -153,7 +212,11 @@ function testStartupQueuesHelloCapsThenOutputRegistration() {
 
 function testSocketCloseClearsImportedOutputState() {
     const output = makeOutput('DP-1', 0);
-    const state = DisplayConnection.createConnectionState({outputs: [output]});
+    const outputMapWriter = makeOutputMapWriterFake();
+    const state = DisplayConnection.createConnectionState({
+        outputs: [output],
+        outputMapWriter,
+    });
     state.onConnected();
     state.dispatchEvent('EVT_OUTPUT_ACCEPTED', {
         consumerOutputId: 0,
@@ -164,6 +227,10 @@ function testSocketCloseClearsImportedOutputState() {
 
     assertEqual(output.backendOutputId, null, 'backend output id cleared');
     assertDeepEqual(output.calls, [['clear']], 'output clear call');
+    assertDeepEqual(outputMapWriter.calls, [
+        [{monitorName: 'DP-1', outputId: 44}],
+        [],
+    ], 'socket close clears output map');
 }
 
 function testReconnectResendsHelloCapsAndOutputs() {
@@ -276,6 +343,246 @@ function testProducerEventsDispatchToOutputImportPath() {
         ['showFrame', {outputId: 17, generation: 5, bufferIndex: 1}, frameFdList],
         ['unbindGeneration', 5],
     ], 'event dispatch order');
+}
+
+function testClientReleasesBindBuffersOwnedFdListAfterSuccessfulHandling() {
+    let frameCallback = null;
+    const closedFds = [];
+    const DisplayConsumer = {
+        Receiver: {
+            new() {
+                return {
+                    connect(signal, callback) {
+                        if (signal === 'frame') {
+                            frameCallback = callback;
+                        }
+                        return 1;
+                    },
+                    start() {
+                        return true;
+                    },
+                };
+            },
+        },
+        dmabuf_texture_close_fd(fd) {
+            closedFds.push(fd);
+        },
+    };
+    const output = makeOutput('DP-1', 0);
+    const state = DisplayConnection.createConnectionState({
+        outputs: [output],
+        outputMapWriter: makeOutputMapWriterFake(),
+    });
+    state.dispatchEvent('EVT_OUTPUT_ACCEPTED', {
+        consumerOutputId: 0,
+        outputId: 17,
+    });
+    makeStartedClient(state, DisplayConsumer);
+    const fdList = makeOwnedFdList([700, 701], [1700, 1701]);
+    const body = new TextEncoder().encode('{"outputId":17,"generation":5}');
+
+    frameCallback(null, DisplayConnection.EVT_BIND_BUFFERS, makeGBytesFake(body), fdList);
+
+    assertDeepEqual(output.calls, [
+        ['bindBuffers', {outputId: 17, generation: 5}, '{"outputId":17,"generation":5}', fdList],
+    ], 'bind buffers dispatched before fd-list release');
+    assertDeepEqual(closedFds, [700, 701], 'bind buffers owned fds released');
+    assertEqual(fdList.get_length(), 0, 'bind buffers fd list drained');
+    assertEqual(fdList.state.stealCalls, 1, 'bind buffers fd list stolen once');
+    assertDeepEqual(fdList.state.getCalls, [], 'bind buffers success does not close get duplicates');
+}
+
+function testClientReleasesFrameReadyOwnedFdListAfterSuccessfulHandling() {
+    let frameCallback = null;
+    const closedFds = [];
+    const DisplayConsumer = {
+        Receiver: {
+            new() {
+                return {
+                    connect(signal, callback) {
+                        if (signal === 'frame') {
+                            frameCallback = callback;
+                        }
+                        return 1;
+                    },
+                    start() {
+                        return true;
+                    },
+                };
+            },
+        },
+        dmabuf_texture_close_fd(fd) {
+            closedFds.push(fd);
+        },
+    };
+    const output = makeOutput('DP-1', 0);
+    const state = DisplayConnection.createConnectionState({
+        outputs: [output],
+        outputMapWriter: makeOutputMapWriterFake(),
+    });
+    state.dispatchEvent('EVT_OUTPUT_ACCEPTED', {
+        consumerOutputId: 0,
+        outputId: 17,
+    });
+    makeStartedClient(state, DisplayConsumer);
+    const fdList = makeOwnedFdList([800, 801], [1800, 1801]);
+
+    frameCallback(null, DisplayConnection.EVT_FRAME_READY, makeGBytesFake(
+        DisplayConnection.frameReadyBodyFromPayload({
+            outputId: 17,
+            generation: 5,
+            bufferIndex: 1,
+        }),
+    ), fdList);
+
+    assertDeepEqual(output.calls, [
+        ['showFrame', {outputId: 17, generation: 5, bufferIndex: 1, sequence: 0, targetTimeUsec: 0, flags: 0}, fdList],
+    ], 'frame ready dispatched before fd-list release');
+    assertDeepEqual(closedFds, [800, 801], 'frame ready owned fds released');
+    assertEqual(fdList.get_length(), 0, 'frame ready fd list drained');
+    assertEqual(fdList.state.stealCalls, 1, 'frame ready fd list stolen once');
+    assertDeepEqual(fdList.state.getCalls, [], 'frame ready success does not close get duplicates');
+}
+
+function testClientReleasesBindBuffersOwnedFdListAfterUnknownOutput() {
+    let frameCallback = null;
+    const closedFds = [];
+    const DisplayConsumer = {
+        Receiver: {
+            new() {
+                return {
+                    connect(signal, callback) {
+                        if (signal === 'frame') {
+                            frameCallback = callback;
+                        }
+                        return 1;
+                    },
+                    start() {
+                        return true;
+                    },
+                };
+            },
+        },
+        dmabuf_texture_close_fd(fd) {
+            closedFds.push(fd);
+        },
+    };
+    const state = DisplayConnection.createConnectionState({
+        outputs: [makeOutput('DP-1', 0)],
+        outputMapWriter: makeOutputMapWriterFake(),
+    });
+    makeStartedClient(state, DisplayConsumer);
+    const fdList = makeOwnedFdList([900, 901], [1900, 1901]);
+    const body = new TextEncoder().encode('{"outputId":99,"generation":5}');
+
+    frameCallback(null, DisplayConnection.EVT_BIND_BUFFERS, makeGBytesFake(body), fdList);
+
+    assertDeepEqual(closedFds, [1900, 1901, 900, 901], 'unknown bind closes duplicate and owned fds');
+    assertEqual(fdList.get_length(), 0, 'unknown bind fd list drained');
+    assertEqual(fdList.state.stealCalls, 1, 'unknown bind fd list stolen once');
+    assertDeepEqual(fdList.state.getCalls, [0, 1], 'unknown bind closes get duplicates');
+}
+
+function testClientReleasesFrameReadyOwnedFdListAfterHandlerException() {
+    let frameCallback = null;
+    const closedFds = [];
+    const DisplayConsumer = {
+        Receiver: {
+            new() {
+                return {
+                    connect(signal, callback) {
+                        if (signal === 'frame') {
+                            frameCallback = callback;
+                        }
+                        return 1;
+                    },
+                    start() {
+                        return true;
+                    },
+                };
+            },
+        },
+        dmabuf_texture_close_fd(fd) {
+            closedFds.push(fd);
+        },
+    };
+    const state = {
+        outputs: [],
+        handleDecodedFrame() {
+            throw new Error('frame handler failed');
+        },
+        takeQueuedFrames() {
+            return [];
+        },
+    };
+    makeStartedClient(state, DisplayConsumer);
+    const fdList = makeOwnedFdList([1000, 1001], [2000, 2001]);
+
+    frameCallback(null, DisplayConnection.EVT_FRAME_READY, makeGBytesFake(
+        DisplayConnection.frameReadyBodyFromPayload({
+            outputId: 17,
+            generation: 5,
+            bufferIndex: 1,
+        }),
+    ), fdList);
+
+    assertDeepEqual(closedFds, [2000, 2001, 1000, 1001], 'exception closes duplicate and owned fds');
+    assertEqual(fdList.get_length(), 0, 'exception fd list drained');
+    assertEqual(fdList.state.stealCalls, 1, 'exception fd list stolen once');
+    assertDeepEqual(fdList.state.getCalls, [0, 1], 'exception closes get duplicates');
+}
+
+function testAcceptedOutputsUpdateHyprlandPluginOutputMap() {
+    const firstOutput = makeOutput('DP-1', 0);
+    const secondOutput = makeOutput('HDMI-A-1', 1);
+    const outputMapWriter = makeOutputMapWriterFake();
+    const state = DisplayConnection.createConnectionState({
+        outputs: [firstOutput, secondOutput],
+        outputMapWriter,
+    });
+
+    state.dispatchEvent('EVT_OUTPUT_ACCEPTED', {
+        consumerOutputId: 0,
+        outputId: 17,
+    });
+    state.dispatchEvent('EVT_OUTPUT_ACCEPTED', {
+        consumerOutputId: 1,
+        outputId: 22,
+    });
+
+    assertDeepEqual(outputMapWriter.calls, [
+        [{monitorName: 'DP-1', outputId: 17}],
+        [
+            {monitorName: 'DP-1', outputId: 17},
+            {monitorName: 'HDMI-A-1', outputId: 22},
+        ],
+    ], 'accepted output map writes');
+
+    state.rebuildTopology([]);
+    assertDeepEqual(outputMapWriter.calls[2], [], 'topology rebuild clears output map');
+}
+
+function testOutputMapFileWriterWritesDocumentedJsonShape() {
+    const path = `/tmp/vivid-output-map-writer-${GLib.get_monotonic_time()}/outputs.json`;
+    const writer = new DisplayConnection.OutputMapFileWriter({
+        path,
+        log() {},
+    });
+
+    writer.write([
+        {monitorName: 'DP-1', outputId: 17},
+        {monitorName: 'HDMI-A-1', outputId: 22},
+    ]);
+
+    const [ok, contents] = GLib.file_get_contents(path);
+    assertEqual(ok, true, 'output map file readable');
+    assertDeepEqual(JSON.parse(new TextDecoder().decode(contents)), {
+        version: 1,
+        outputs: [
+            {monitorName: 'DP-1', outputId: 17},
+            {monitorName: 'HDMI-A-1', outputId: 22},
+        ],
+    }, 'output map json payload');
 }
 
 function testPointerMotionQueuesScaledBinaryFrameForAcceptedOutput() {
@@ -561,6 +868,12 @@ function testRejectedFrameSignalsReleaseSyncobjBeforeCloseWhenPaintableRefreshFa
     testTopologyRebuildClearsOutputsBeforeReconnect,
     testConnectedRuntimeTopologyRebuildReconnectsBeforeReplayingHandshake,
     testProducerEventsDispatchToOutputImportPath,
+    testClientReleasesBindBuffersOwnedFdListAfterSuccessfulHandling,
+    testClientReleasesFrameReadyOwnedFdListAfterSuccessfulHandling,
+    testClientReleasesBindBuffersOwnedFdListAfterUnknownOutput,
+    testClientReleasesFrameReadyOwnedFdListAfterHandlerException,
+    testAcceptedOutputsUpdateHyprlandPluginOutputMap,
+    testOutputMapFileWriterWritesDocumentedJsonShape,
     testPointerMotionQueuesScaledBinaryFrameForAcceptedOutput,
     testPointerMotionIgnoresOutputWithoutBackendId,
     testClientQueuesPointerMotionThroughState,

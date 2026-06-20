@@ -22,7 +22,9 @@ function parseRuntimeArgs(argv, options = {}) {
     const parsed = {
         socketPath: defaultSocketPath(runtimeDir),
         compositor: 'auto',
+        pointerEventsRequested: false,
         pointerEventsEnabled: false,
+        requiresHyprlandPlugin: false,
     };
 
     for (let index = 0; index < argv.length; index += 1) {
@@ -46,11 +48,9 @@ function parseRuntimeArgs(argv, options = {}) {
             parsed.compositor = compositor;
         } else if (arg === '--no-input') {
             noInputRequested = true;
-            pointerEventsRequested = false;
             parsed.pointerEventsEnabled = false;
         } else if (arg === '--enable-pointer-events') {
             pointerEventsRequested = true;
-            parsed.pointerEventsEnabled = true;
         } else if (arg === '--exit-after-ms') {
             index += 1;
             if (index >= argv.length) {
@@ -69,7 +69,9 @@ function parseRuntimeArgs(argv, options = {}) {
     if (pointerEventsRequested && !noInputRequested && parsed.compositor === 'auto') {
         parsed.compositor = detectCompositor(env);
     }
-    parsed.pointerEventsEnabled = pointerEventsRequested && !noInputRequested && parsed.compositor === 'hyprland';
+    parsed.pointerEventsRequested = pointerEventsRequested;
+    parsed.pointerEventsEnabled = false;
+    parsed.requiresHyprlandPlugin = pointerEventsRequested && !noInputRequested && parsed.compositor === 'hyprland';
 
     return parsed;
 }

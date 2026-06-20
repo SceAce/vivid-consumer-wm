@@ -9,6 +9,8 @@
 
 #include "vivid_producer_config.h"
 #include "vivid_dmabuf_negotiation.h"
+#include "vivid_fd_debug.h"
+#include "vivid_pointer_debug.h"
 #include "vivid_producer_renderer.h"
 #include "vivid_unbind_ack_tracker.h"
 
@@ -252,6 +254,7 @@ struct _Producer
     GAsyncQueue* release_queue;
     GThread* release_thread;
     gboolean release_thread_stopping;
+    guint fd_debug_source_id;
     gboolean user_playing;
     gboolean policy_paused;
     gboolean policy_stopped;
@@ -4695,6 +4698,11 @@ handle_pointer_event(Client* client, guint16 opcode, const guint8* body, gsize b
 {
     if (opcode == VIVID_DISPLAY_REQ_POINTER_MOTION &&
         body_len == VIVID_DISPLAY_POINTER_MOTION_BODY_BYTES) {
+        vivid_pointer_debug_log_motion("VividProducer:",
+                                       read_u32_le(&body[0]),
+                                       read_f64_le(&body[4]),
+                                       read_f64_le(&body[12]),
+                                       read_u64_le(&body[20]));
         vivid_producer_renderer_pointer_motion(client->producer->renderer,
                                                 read_f64_le(&body[4]),
                                                 read_f64_le(&body[12]));
@@ -5350,9 +5358,11 @@ main(int argc, char** argv)
 
     g_unix_signal_add(SIGINT, quit_on_signal, &producer);
     g_unix_signal_add(SIGTERM, quit_on_signal, &producer);
+    producer.fd_debug_source_id = vivid_fd_debug_start("VividProducer:");
 
     g_main_loop_run(producer.loop);
 
+    vivid_fd_debug_stop(&producer.fd_debug_source_id);
     vivid_producer_renderer_set_release_gate(producer.renderer, NULL);
     producer_stop(&producer);
     producer_release_coordinator_stop(&producer);

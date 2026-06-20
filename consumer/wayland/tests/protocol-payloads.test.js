@@ -44,7 +44,7 @@ function testHelloIdentifiesWaylandConsumer() {
     ], 'hello base features');
 }
 
-function testHelloAdvertisesPointerFeatureOnlyWhenEnabled() {
+function testHelloNeverAdvertisesPointerFeature() {
     const disabledPayload = ProtocolPayloads.buildHelloPayload({
         pointerEventsEnabled: false,
     });
@@ -53,9 +53,7 @@ function testHelloAdvertisesPointerFeatureOnlyWhenEnabled() {
     });
 
     assertNotIncludes(disabledPayload.features, 'pointer-events-v1', 'disabled hello pointer feature');
-    if (!enabledPayload.features.includes('pointer-events-v1')) {
-        throw new Error(`enabled hello pointer feature: expected ${JSON.stringify(enabledPayload.features)} to include pointer-events-v1`);
-    }
+    assertNotIncludes(enabledPayload.features, 'pointer-events-v1', 'enabled hello pointer feature');
     assertNotIncludes(enabledPayload.features, 'media-state-v1', 'hello media feature');
     assertNotIncludes(enabledPayload.features, 'audio-samples-v1', 'hello audio feature');
 }
@@ -73,7 +71,7 @@ function testConsumerCapsExcludeProtocolFeaturesAndMediaAudio() {
     assertEqual(payload.audioSamples, undefined, 'audio samples field');
 }
 
-function testPointerCapabilityFollowsPointerEventsOption() {
+function testPointerCapabilityIsAlwaysDisabled() {
     const disabledPayload = ProtocolPayloads.buildConsumerCapsPayload({
         pointerEventsEnabled: false,
     });
@@ -84,7 +82,7 @@ function testPointerCapabilityFollowsPointerEventsOption() {
     assertEqual(disabledPayload.features, undefined, 'disabled consumer caps feature list');
     assertEqual(enabledPayload.features, undefined, 'enabled consumer caps feature list');
     assertEqual(disabledPayload.pointerEvents, false, 'disabled pointer events field');
-    assertEqual(enabledPayload.pointerEvents, true, 'enabled pointer events field');
+    assertEqual(enabledPayload.pointerEvents, false, 'enabled pointer events field');
 }
 
 function testConsumerCapsExposeFutureProducerFieldsWithoutFakeDmabufCaps() {
@@ -123,9 +121,9 @@ function testOutputRegistrationUsesSameFeaturePolicy() {
 
 [
     testHelloIdentifiesWaylandConsumer,
-    testHelloAdvertisesPointerFeatureOnlyWhenEnabled,
+    testHelloNeverAdvertisesPointerFeature,
     testConsumerCapsExcludeProtocolFeaturesAndMediaAudio,
-    testPointerCapabilityFollowsPointerEventsOption,
+    testPointerCapabilityIsAlwaysDisabled,
     testConsumerCapsExposeFutureProducerFieldsWithoutFakeDmabufCaps,
     testOutputRegistrationUsesSameFeaturePolicy,
 ].forEach(testCase => testCase());

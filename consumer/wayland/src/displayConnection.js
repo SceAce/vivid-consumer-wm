@@ -223,6 +223,20 @@ function closeFrameFdList(DisplayConsumer, fdList) {
     }
 }
 
+function releaseFdList(DisplayConsumer, fdList) {
+    if (!fdList || typeof fdList.steal_fds !== 'function') {
+        return;
+    }
+
+    try {
+        for (const fd of fdList.steal_fds()) {
+            closeDisplayConsumerFd(DisplayConsumer, fd);
+        }
+    } catch (error) {
+        printerr(`Vivid Wayland Consumer: fd-list release failed: ${error}`);
+    }
+}
+
 function signalReleaseSyncobj(DisplayConsumer, generation, releaseFd) {
     if (!Number.isFinite(releaseFd) || releaseFd < 0) {
         return;
@@ -278,6 +292,42 @@ function numberOrDefault(value, defaultValue) {
     return Number.isFinite(number) ? number : defaultValue;
 }
 
+function defaultOutputMapPath() {
+    const runtimeDir = GLib.getenv('XDG_RUNTIME_DIR') || '/tmp';
+    return GLib.build_filenamev([runtimeDir, 'vivid', 'outputs.json']);
+}
+
+var OutputMapFileWriter = class OutputMapFileWriter {
+    constructor(options = {}) {
+        this._path = options.path || defaultOutputMapPath();
+        this._log = options.log || (message => printerr(`Vivid Wayland Consumer: ${message}`));
+        this._loggedFailure = false;
+    }
+
+    write(outputs) {
+        try {
+            const directory = GLib.path_get_dirname(this._path);
+            GLib.mkdir_with_parents(directory, 0o700);
+            const payload = JSON.stringify({
+                version: 1,
+                outputs,
+            });
+            const tempPath = `${this._path}.tmp-${GLib.get_monotonic_time()}`;
+            GLib.file_set_contents(tempPath, payload);
+            const renameResult = GLib.rename(tempPath, this._path);
+            if (renameResult !== 0) {
+                throw new Error(`rename failed with code ${renameResult}`);
+            }
+            this._loggedFailure = false;
+        } catch (error) {
+            if (!this._loggedFailure) {
+                this._log(`failed to write Hyprland output map ${this._path}: ${error.message ?? error}`);
+                this._loggedFailure = true;
+            }
+        }
+    }
+};
+
 function payloadForOutput(output, options = {}) {
     if (typeof output.outputPayload === 'function') {
         return output.outputPayload();
@@ -300,6 +350,8 @@ var DisplayConnectionState = class DisplayConnectionState {
             compositor: options.compositor || 'auto',
             renderer: options.renderer,
             dmabufCaps: options.dmabufCaps,
+            outputMapWriter: options.outputMapWriter ||
+                new OutputMapFileWriter({path: options.outputMapPath, log: options.log}),
         };
         this._queuedFrames = [];
         this._outputs = [];
@@ -308,6 +360,7 @@ var DisplayConnectionState = class DisplayConnectionState {
         this.rebuildTopology(options.outputs || [], {
             connected: false,
             clearExisting: false,
+            writeOutputMap: false,
         });
     }
 
@@ -334,9 +387,11 @@ var DisplayConnectionState = class DisplayConnectionState {
 
     onSocketClosed() {
         this._clearImportedOutputState();
+        this._writeOutputMap();
     }
 
     rebuildTopology(outputs, options = {}) {
+        const shouldWriteOutputMap = options.writeOutputMap !== false;
         if (options.clearExisting !== false) {
             this._clearImportedOutputState();
         }
@@ -346,6 +401,9 @@ var DisplayConnectionState = class DisplayConnectionState {
         this._outputsByBackendId = new Map();
         for (const output of outputs) {
             this._outputsByConsumerId.set(Number(output.consumerOutputId ?? output.monitorIndex ?? 0), output);
+        }
+        if (shouldWriteOutputMap) {
+            this._writeOutputMap();
         }
     }
 
@@ -490,7 +548,27 @@ var DisplayConnectionState = class DisplayConnectionState {
 
         output.backendOutputId = backendOutputId;
         this._outputsByBackendId.set(backendOutputId, output);
+        this._writeOutputMap();
         return true;
+    }
+
+    _writeOutputMap() {
+        const outputs = [];
+        for (const output of this._outputs) {
+            const backendOutputId = Number(output.backendOutputId);
+            if (!Number.isFinite(backendOutputId) || backendOutputId <= 0) {
+                continue;
+            }
+            const monitorName = String(output.outputId ?? output.monitorName ?? '');
+            if (monitorName === '') {
+                continue;
+            }
+            outputs.push({
+                monitorName,
+                outputId: backendOutputId,
+            });
+        }
+        this._options.outputMapWriter?.write(outputs);
     }
 
     _outputForBackendId(outputId) {
@@ -854,6 +932,7 @@ var DisplaySocketClient = class DisplaySocketClient {
         this._receiver = this._DisplayConsumer.Receiver.new(this._connection);
         this._receiverSignalIds = [
             this._receiver.connect('frame', (_receiver, opcode, body, fdList) => {
+                const shouldReleaseFdList = opcode === EVT_FRAME_READY || opcode === EVT_BIND_BUFFERS;
                 try {
                     const handled = this._state.handleDecodedFrame(opcode, bytesFromGBytes(body), fdList);
                     if (!handled && (opcode === EVT_FRAME_READY || opcode === EVT_BIND_BUFFERS)) {
@@ -864,6 +943,10 @@ var DisplaySocketClient = class DisplaySocketClient {
                     this._log(`failed to handle frame opcode=${opcode}: ${error}`);
                     if (opcode === EVT_FRAME_READY || opcode === EVT_BIND_BUFFERS) {
                         closeFrameFdList(this._DisplayConsumer, fdList);
+                    }
+                } finally {
+                    if (shouldReleaseFdList) {
+                        releaseFdList(this._DisplayConsumer, fdList);
                     }
                 }
             }),
@@ -1011,6 +1094,7 @@ var DisplayConnection = {
     frameReadyBodyFromPayload,
     unbindBodyFromPayload,
     pointerMotionBodyFromPayload,
+    OutputMapFileWriter,
     WaylandOutputPresenter,
     DisplaySocketClient,
 };

@@ -73,7 +73,7 @@ function testInputDisabledByDefault() {
     assertEqual(options.pointerEventsEnabled, false, 'pointer events default');
 }
 
-function testPointerFeatureAdvertisementIsAcceptedForHyprland() {
+function testPointerFeatureRequestRequiresHyprlandPluginForHyprland() {
     const options = RuntimeArgs.parseRuntimeArgs([
         '--compositor', 'hyprland',
         '--enable-pointer-events',
@@ -81,10 +81,12 @@ function testPointerFeatureAdvertisementIsAcceptedForHyprland() {
         runtimeDir: '/run/user/1000',
     });
 
-    assertEqual(options.pointerEventsEnabled, true, 'hyprland pointer events enabled');
+    assertEqual(options.pointerEventsRequested, true, 'hyprland pointer events requested');
+    assertEqual(options.pointerEventsEnabled, false, 'hyprland wayland pointer events disabled');
+    assertEqual(options.requiresHyprlandPlugin, true, 'hyprland plugin required');
 }
 
-function testPointerFeatureAdvertisementUsesAutoDetectedHyprland() {
+function testPointerFeatureRequestUsesAutoDetectedHyprland() {
     const options = RuntimeArgs.parseRuntimeArgs(['--enable-pointer-events'], {
         runtimeDir: '/run/user/1000',
         env(name) {
@@ -93,10 +95,12 @@ function testPointerFeatureAdvertisementUsesAutoDetectedHyprland() {
     });
 
     assertEqual(options.compositor, 'hyprland', 'auto-detected compositor mode');
-    assertEqual(options.pointerEventsEnabled, true, 'auto-detected pointer events enabled');
+    assertEqual(options.pointerEventsRequested, true, 'auto-detected pointer events requested');
+    assertEqual(options.pointerEventsEnabled, false, 'auto-detected wayland pointer events disabled');
+    assertEqual(options.requiresHyprlandPlugin, true, 'auto-detected hyprland plugin required');
 }
 
-function testExplicitAutoPointerFeatureAdvertisementUsesAutoDetectedHyprland() {
+function testExplicitAutoPointerFeatureRequestUsesAutoDetectedHyprland() {
     const options = RuntimeArgs.parseRuntimeArgs([
         '--compositor', 'auto',
         '--enable-pointer-events',
@@ -108,7 +112,9 @@ function testExplicitAutoPointerFeatureAdvertisementUsesAutoDetectedHyprland() {
     });
 
     assertEqual(options.compositor, 'hyprland', 'explicit auto-detected compositor mode');
-    assertEqual(options.pointerEventsEnabled, true, 'explicit auto-detected pointer events enabled');
+    assertEqual(options.pointerEventsRequested, true, 'explicit auto-detected pointer events requested');
+    assertEqual(options.pointerEventsEnabled, false, 'explicit auto-detected wayland pointer events disabled');
+    assertEqual(options.requiresHyprlandPlugin, true, 'explicit auto-detected hyprland plugin required');
 }
 
 function testNoInputDisablesPointerEvents() {
@@ -121,6 +127,7 @@ function testNoInputDisablesPointerEvents() {
     });
 
     assertEqual(options.pointerEventsEnabled, false, 'no-input disables pointer events');
+    assertEqual(options.requiresHyprlandPlugin, false, 'no-input skips hyprland plugin requirement');
 }
 
 function testNoInputDisablesPointerEventsRegardlessOfArgumentOrder() {
@@ -133,6 +140,7 @@ function testNoInputDisablesPointerEventsRegardlessOfArgumentOrder() {
     });
 
     assertEqual(options.pointerEventsEnabled, false, 'no-input disables later pointer events flag');
+    assertEqual(options.requiresHyprlandPlugin, false, 'no-input skips later hyprland plugin requirement');
 }
 
 function testPointerFeatureAdvertisementIsAcceptedButDisabledForGenericAndNiri() {
@@ -143,6 +151,7 @@ function testPointerFeatureAdvertisementIsAcceptedButDisabledForGenericAndNiri()
         ], {runtimeDir: '/run/user/1000'});
 
         assertEqual(options.pointerEventsEnabled, false, `${compositor} pointer events disabled`);
+        assertEqual(options.requiresHyprlandPlugin, false, `${compositor} hyprland plugin not required`);
     }
 }
 
@@ -156,6 +165,7 @@ function testPointerFeatureAdvertisementIsAcceptedButDisabledForUndetectedAutoMo
 
     assertEqual(options.compositor, 'auto', 'undetected auto compositor mode');
     assertEqual(options.pointerEventsEnabled, false, 'undetected auto pointer events disabled');
+    assertEqual(options.requiresHyprlandPlugin, false, 'undetected auto hyprland plugin not required');
 }
 
 function testInvalidCompositorModeStillFailsWithPointerFlag() {
@@ -228,9 +238,9 @@ function testUnknownArgumentFails() {
     testDefaultCompositorMode,
     testSupportedCompositorModes,
     testInputDisabledByDefault,
-    testPointerFeatureAdvertisementIsAcceptedForHyprland,
-    testPointerFeatureAdvertisementUsesAutoDetectedHyprland,
-    testExplicitAutoPointerFeatureAdvertisementUsesAutoDetectedHyprland,
+    testPointerFeatureRequestRequiresHyprlandPluginForHyprland,
+    testPointerFeatureRequestUsesAutoDetectedHyprland,
+    testExplicitAutoPointerFeatureRequestUsesAutoDetectedHyprland,
     testNoInputDisablesPointerEvents,
     testNoInputDisablesPointerEventsRegardlessOfArgumentOrder,
     testPointerFeatureAdvertisementIsAcceptedButDisabledForGenericAndNiri,
