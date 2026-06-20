@@ -27,6 +27,10 @@ struct _VividProducerConfig
     gboolean debug_mode;
     gchar* render_device;
     gint content_fit;
+    gint output_size_mode;
+    gint output_width;
+    gint output_height;
+    gchar* output_shikane_profile;
     gint scene_fps;
     gint startup_delay;
     gboolean show_panel_menu;
