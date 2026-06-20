@@ -1,0 +1,16 @@
+[Unit]
+Description=Vivid Web UI
+After=graphical-session.target
+PartOf=vivid-hyprland.target
+
+[Service]
+Type=simple
+WorkingDirectory=@REPO_ROOT@
+Environment=VIVID_WEBUI_HOST=127.0.0.1
+Environment=VIVID_WEBUI_PORT=8765
+ExecStart=/usr/bin/env bash @REPO_ROOT@/tools/vivid.sh direct-run run-webui
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=vivid-hyprland.target

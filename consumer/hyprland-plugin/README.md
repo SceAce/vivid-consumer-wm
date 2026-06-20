@@ -30,6 +30,20 @@ hyprctl plugin load "$HOME/.local/lib/vivid/hyprland/libvivid-hyprland-bridge.so
 
 Use that stable path after a Hyprland restart or from persistent config.
 
+For persistent login sessions, keep plugin loading in Hyprland config rather
+than a systemd user service:
+
+```ini
+plugin = /home/source/.local/lib/vivid/hyprland/libvivid-hyprland-bridge.so
+```
+
+If you use the Vivid user-systemd target for producer/Web UI/Wayland consumer
+autostart, Hyprland can start that target separately with:
+
+```ini
+exec-once = systemctl --user start vivid-hyprland.target
+```
+
 For in-session development reloads, use the unique reload copy printed by the
 install command, under:
 

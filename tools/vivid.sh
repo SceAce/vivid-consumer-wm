@@ -11,6 +11,7 @@ Usage:
   tools/vivid.sh build {direct-run|gnome|kde|wayland|hyprland-plugin|flatpak|all}
   tools/vivid.sh clean {direct-run|gnome|kde|wayland|hyprland-plugin|flatpak|producer|consumer|all}
   tools/vivid.sh completion bash
+  tools/vivid.sh systemd-user {install|start|stop|restart|status|logs}
 
   tools/vivid.sh direct-run {build|clean}
   tools/vivid.sh direct-run run
@@ -52,7 +53,7 @@ _vivid_sh_completion() {
     cur="${COMP_WORDS[COMP_CWORD]}"
     COMPREPLY=()
 
-    local top_commands="build clean direct-run gnome consumer-gnome kde consumer-kde wayland consumer-wayland hyprland-plugin consumer-hyprland-plugin consumer flatpak producer completion help -h --help"
+    local top_commands="build clean direct-run gnome consumer-gnome kde consumer-kde wayland consumer-wayland hyprland-plugin consumer-hyprland-plugin consumer flatpak producer systemd-user completion help -h --help"
     local build_targets="direct-run producer gnome consumer-gnome kde consumer-kde wayland consumer-wayland hyprland-plugin consumer-hyprland-plugin flatpak all"
     local clean_targets="direct-run gnome consumer-gnome kde consumer-kde wayland consumer-wayland hyprland-plugin consumer-hyprland-plugin flatpak producer consumer all"
     local direct_run_actions="build clean run run-producer run-webui"
@@ -62,6 +63,7 @@ _vivid_sh_completion() {
     local hyprland_plugin_actions="build test install clean"
     local flatpak_actions="prefetch build clean run-appdir"
     local producer_actions="build-direct-run run-direct-run run-direct-run-producer run-direct-run-webui prefetch build-flatpak run-flatpak-appdir clean-direct-run clean-flatpak clean"
+    local systemd_user_actions="install start stop restart status logs"
 
     _vivid_complete_words() {
         COMPREPLY=( $(compgen -W "$1" -- "${cur}") )
@@ -142,6 +144,13 @@ _vivid_sh_completion() {
                 _vivid_complete_words "${producer_actions}"
             elif [[ "${COMP_WORDS[2]}" == "run-direct-run-producer" || "${COMP_WORDS[2]}" == "run-direct-run-webui" ]]; then
                 COMPREPLY=( $(compgen -f -- "${cur}") )
+            fi
+            ;;
+        systemd-user)
+            if [[ "${COMP_CWORD}" -eq 2 ]]; then
+                _vivid_complete_words "${systemd_user_actions}"
+            elif [[ "${COMP_CWORD}" -eq 3 ]]; then
+                _vivid_complete_words "--dry-run"
             fi
             ;;
         completion)
@@ -513,6 +522,14 @@ run_flatpak() {
     esac
 }
 
+run_systemd_user() {
+    if [[ $# -eq 0 ]]; then
+        die_usage "missing systemd-user action"
+    fi
+
+    bash "${SCRIPT_DIR}/systemd_user/install.sh" "$@"
+}
+
 run_producer_alias() {
     local action="${1:-}"
     if [[ -z "${action}" ]]; then
@@ -621,6 +638,10 @@ case "${1:-help}" in
     producer)
         shift
         run_producer_alias "$@"
+        ;;
+    systemd-user)
+        shift
+        run_systemd_user "$@"
         ;;
     completion)
         shift
