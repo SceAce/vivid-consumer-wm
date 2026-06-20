@@ -9,6 +9,8 @@
 
 #include "vivid_producer_config.h"
 #include "vivid_dmabuf_negotiation.h"
+#include "vivid_fd_debug.h"
+#include "vivid_pointer_debug.h"
 #include "vivid_producer_renderer.h"
 #include "vivid_unbind_ack_tracker.h"
 
@@ -28,6 +30,7 @@
 #include <poll.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
@@ -186,6 +189,10 @@ typedef struct
     guint32 consumer_output_id;
     guint32 monitor_index;
     guint32 output_id;
+    guint32 requested_logical_width;
+    guint32 requested_logical_height;
+    guint32 requested_physical_width;
+    guint32 requested_physical_height;
     guint32 logical_width;
     guint32 logical_height;
     guint32 width;
@@ -252,11 +259,13 @@ struct _Producer
     GAsyncQueue* release_queue;
     GThread* release_thread;
     gboolean release_thread_stopping;
+    guint fd_debug_source_id;
     gboolean user_playing;
     gboolean policy_paused;
     gboolean policy_stopped;
     guint64 media_state_received;
     guint64 audio_samples_received;
+    gchar* last_output_size_warning;
 };
 
 static void client_free(Client* client);
@@ -275,6 +284,20 @@ static const gchar* json_object_get_string_default(JsonObject* object,
                                                    const gchar* member,
                                                    const gchar* fallback);
 static gboolean json_value_to_uint64(JsonNode* node, guint64* out_value);
+static void producer_log_output_size_warning(Producer* producer, const gchar* warning_key, const gchar* message);
+static gchar* shikane_config_path(void);
+static gchar* trimmed_toml_string_value(const gchar* text);
+static gboolean split_toml_key_value(const gchar*  text,
+                                     gchar**       key_out,
+                                     const gchar** value_out);
+
+typedef enum
+{
+    SHIKANE_TOML_TABLE_NONE,
+    SHIKANE_TOML_TABLE_PROFILE,
+    SHIKANE_TOML_TABLE_PROFILE_OUTPUT,
+    SHIKANE_TOML_TABLE_OTHER,
+} ShikaneTomlTable;
 
 static VividDisplayClientRole
 client_role_from_text(const gchar* text)
@@ -1447,6 +1470,62 @@ build_gpu_devices_json_array(VividProducerRenderer* renderer)
     return array;
 }
 
+static JsonArray*
+build_shikane_profiles_json_array(void)
+{
+    JsonArray* array = json_array_new();
+    g_autoptr(GHashTable) seen =
+        g_hash_table_new_full(g_str_hash, g_str_equal, g_free, NULL);
+    g_autofree gchar* path = shikane_config_path();
+    gchar* contents = NULL;
+    gsize contents_len = 0;
+    GError* error = NULL;
+
+    if (!g_file_get_contents(path, &contents, &contents_len, &error)) {
+        g_clear_error(&error);
+        return array;
+    }
+
+    ShikaneTomlTable current_table = SHIKANE_TOML_TABLE_NONE;
+    g_auto(GStrv) lines = g_strsplit(contents, "\n", -1);
+    for (guint i = 0; lines[i] != NULL; i++) {
+        g_autofree gchar* line = g_strdup(lines[i]);
+        g_strstrip(line);
+        if (!*line || line[0] == '#')
+            continue;
+
+        if (g_str_has_prefix(line, "[[profile]]")) {
+            current_table = SHIKANE_TOML_TABLE_PROFILE;
+            continue;
+        }
+
+        if (line[0] == '[') {
+            current_table = SHIKANE_TOML_TABLE_OTHER;
+            continue;
+        }
+
+        if (current_table != SHIKANE_TOML_TABLE_PROFILE)
+            continue;
+
+        g_autofree gchar* key = NULL;
+        const gchar* value_text = NULL;
+        if (!split_toml_key_value(line, &key, &value_text))
+            continue;
+        if (g_strcmp0(key, "name") != 0)
+            continue;
+
+        g_autofree gchar* value = trimmed_toml_string_value(line);
+        if (!value || !*value || g_hash_table_contains(seen, value))
+            continue;
+
+        json_array_add_string_element(array, value);
+        g_hash_table_add(seen, g_strdup(value));
+    }
+
+    g_free(contents);
+    return array;
+}
+
 static gchar*
 build_control_state_json(Producer* producer)
 {
@@ -1482,6 +1561,9 @@ build_control_state_json(Producer* producer)
     json_object_set_array_member(object,
                                  "gpu-devices",
                                  build_gpu_devices_json_array(producer->renderer));
+    json_object_set_array_member(object,
+                                 "shikane-profiles",
+                                 build_shikane_profiles_json_array());
 
     VividGpuDevice resolved_gpu;
     if (vivid_producer_renderer_resolved_gpu(producer->renderer, &resolved_gpu)) {
@@ -2957,6 +3039,10 @@ static Output*
 output_new(Client*   client,
            guint32   consumer_output_id,
            guint32   monitor_index,
+           guint32   requested_logical_width,
+           guint32   requested_logical_height,
+           guint32   requested_physical_width,
+           guint32   requested_physical_height,
            guint32   logical_width,
            guint32   logical_height,
            guint32   width,
@@ -2973,6 +3059,10 @@ output_new(Client*   client,
     output->consumer_output_id = consumer_output_id;
     output->monitor_index = monitor_index;
     output->output_id = producer->next_output_id++;
+    output->requested_logical_width = requested_logical_width;
+    output->requested_logical_height = requested_logical_height;
+    output->requested_physical_width = requested_physical_width;
+    output->requested_physical_height = requested_physical_height;
     output->logical_width = CLAMP(logical_width, 1u, OUTPUT_MAX_DIMENSION);
     output->logical_height = CLAMP(logical_height, 1u, OUTPUT_MAX_DIMENSION);
     output->width = CLAMP(width, 1u, OUTPUT_MAX_DIMENSION);
@@ -3035,6 +3125,374 @@ fail:
     output_release_buffers(output);
     g_free(output);
     return NULL;
+}
+
+static guint32
+round_scaled_output_dimension(guint32 logical_size, gdouble scale)
+{
+    return (guint32)MAX(1.0, floor((gdouble)logical_size * MAX(1.0, scale) + 0.5));
+}
+
+static gchar*
+shikane_config_path(void)
+{
+    return g_build_filename(g_get_home_dir(), ".config", "shikane", "config.toml", NULL);
+}
+
+static gboolean
+parse_shikane_mode_dimensions(const gchar* mode_text,
+                              guint32*     width,
+                              guint32*     height)
+{
+    if (!mode_text || !*mode_text || !width || !height)
+        return FALSE;
+
+    gchar* end = NULL;
+    const guint64 parsed_width = g_ascii_strtoull(mode_text, &end, 10);
+    if (end == mode_text || !end || *end != 'x' || parsed_width == 0 || parsed_width > G_MAXUINT32)
+        return FALSE;
+
+    const gchar* height_text = end + 1;
+    const guint64 parsed_height = g_ascii_strtoull(height_text, &end, 10);
+    if (end == height_text || !end || *end != '@' || parsed_height == 0 || parsed_height > G_MAXUINT32)
+        return FALSE;
+
+    *width = (guint32)parsed_width;
+    *height = (guint32)parsed_height;
+    return TRUE;
+}
+
+static gboolean
+parse_shikane_boolean(const gchar* value,
+                      gboolean*    out_value)
+{
+    if (!value || !out_value)
+        return FALSE;
+    if (g_ascii_strcasecmp(value, "true") == 0) {
+        *out_value = TRUE;
+        return TRUE;
+    }
+    if (g_ascii_strcasecmp(value, "false") == 0) {
+        *out_value = FALSE;
+        return TRUE;
+    }
+    return FALSE;
+}
+
+static gchar*
+trimmed_toml_string_value(const gchar* text)
+{
+    if (!text)
+        return NULL;
+
+    const gchar* equals = strchr(text, '=');
+    if (!equals)
+        return NULL;
+
+    g_autofree gchar* value = g_strdup(equals + 1);
+    g_strstrip(value);
+
+    gboolean in_string = FALSE;
+    gboolean escaped = FALSE;
+    for (gchar* p = value; *p; p++) {
+        if (escaped) {
+            escaped = FALSE;
+            continue;
+        }
+        if (in_string && *p == '\\') {
+            escaped = TRUE;
+            continue;
+        }
+        if (*p == '"') {
+            in_string = !in_string;
+            continue;
+        }
+        if (!in_string && *p == '#') {
+            *p = '\0';
+            break;
+        }
+    }
+    g_strstrip(value);
+
+    const gsize len = strlen(value);
+    if (len >= 2 && value[0] == '"' && value[len - 1] == '"') {
+        value[len - 1] = '\0';
+        return g_strdup(value + 1);
+    }
+
+    return g_strdup(value);
+}
+
+static gboolean
+split_toml_key_value(const gchar*  text,
+                     gchar**       key_out,
+                     const gchar** value_out)
+{
+    if (!text || !key_out || !value_out)
+        return FALSE;
+
+    const gchar* equals = strchr(text, '=');
+    if (!equals)
+        return FALSE;
+
+    g_autofree gchar* key = g_strndup(text, (gsize)(equals - text));
+    g_strstrip(key);
+    if (!*key)
+        return FALSE;
+
+    *key_out = g_steal_pointer(&key);
+    *value_out = equals + 1;
+    return TRUE;
+}
+
+static void
+producer_log_output_size_warning(Producer* producer,
+                                 const gchar* warning_key,
+                                 const gchar* message)
+{
+    if (!producer || !warning_key || !message)
+        return;
+    if (g_strcmp0(producer->last_output_size_warning, warning_key) == 0)
+        return;
+
+    g_free(producer->last_output_size_warning);
+    producer->last_output_size_warning = g_strdup(warning_key);
+    g_warning("%s", message);
+}
+
+static void
+producer_clear_output_size_warning(Producer* producer)
+{
+    if (!producer)
+        return;
+    g_clear_pointer(&producer->last_output_size_warning, g_free);
+}
+
+static gboolean
+resolve_shikane_profile_output_size(const gchar*  profile_name,
+                                    guint32*      logical_width,
+                                    guint32*      logical_height,
+                                    const gchar** failure_reason)
+{
+    g_return_val_if_fail(logical_width != NULL, FALSE);
+    g_return_val_if_fail(logical_height != NULL, FALSE);
+
+    if (!profile_name || !*profile_name) {
+        if (failure_reason)
+            *failure_reason = "profile name is empty";
+        return FALSE;
+    }
+
+    g_autofree gchar* path = shikane_config_path();
+    gchar* contents = NULL;
+    gsize contents_len = 0;
+    GError* error = NULL;
+    if (!g_file_get_contents(path, &contents, &contents_len, &error)) {
+        if (failure_reason)
+            *failure_reason = "config file is missing or unreadable";
+        g_clear_error(&error);
+        return FALSE;
+    }
+
+    ShikaneTomlTable current_table = SHIKANE_TOML_TABLE_NONE;
+    gboolean current_profile_is_target = FALSE;
+    gboolean saw_target_profile = FALSE;
+    gboolean current_output_enabled = FALSE;
+    gboolean saw_enabled_output = FALSE;
+    gboolean saw_enabled_output_entry = FALSE;
+    g_autofree gchar* current_mode = NULL;
+
+    g_auto(GStrv) lines = g_strsplit(contents, "\n", -1);
+    for (guint i = 0; lines[i] != NULL; i++) {
+        g_autofree gchar* line = g_strdup(lines[i]);
+        g_strstrip(line);
+        if (!*line || line[0] == '#')
+            continue;
+
+        if (g_str_has_prefix(line, "[[profile]]")) {
+            current_table = SHIKANE_TOML_TABLE_PROFILE;
+            current_profile_is_target = FALSE;
+            current_output_enabled = FALSE;
+            g_clear_pointer(&current_mode, g_free);
+            continue;
+        }
+
+        if (g_str_has_prefix(line, "[[profile.output]]")) {
+            current_table = SHIKANE_TOML_TABLE_PROFILE_OUTPUT;
+            current_output_enabled = FALSE;
+            g_clear_pointer(&current_mode, g_free);
+            continue;
+        }
+
+        if (line[0] == '[') {
+            current_table = SHIKANE_TOML_TABLE_OTHER;
+            current_output_enabled = FALSE;
+            g_clear_pointer(&current_mode, g_free);
+            continue;
+        }
+
+        g_autofree gchar* key = NULL;
+        const gchar* value_text = NULL;
+        if (!split_toml_key_value(line, &key, &value_text))
+            continue;
+
+        if (current_table == SHIKANE_TOML_TABLE_PROFILE && g_strcmp0(key, "name") == 0) {
+            g_autofree gchar* value = trimmed_toml_string_value(line);
+            current_profile_is_target = value && g_strcmp0(value, profile_name) == 0;
+            if (current_profile_is_target)
+                saw_target_profile = TRUE;
+            continue;
+        }
+
+        if (current_table != SHIKANE_TOML_TABLE_PROFILE_OUTPUT || !current_profile_is_target)
+            continue;
+
+        if (g_strcmp0(key, "enable") == 0) {
+            g_autofree gchar* value = trimmed_toml_string_value(line);
+            gboolean enabled = FALSE;
+            if (parse_shikane_boolean(value, &enabled)) {
+                current_output_enabled = enabled;
+                if (enabled)
+                    saw_enabled_output_entry = TRUE;
+            }
+            if (current_output_enabled && current_mode) {
+                saw_enabled_output = TRUE;
+                if (parse_shikane_mode_dimensions(current_mode, logical_width, logical_height)) {
+                    g_free(contents);
+                    return TRUE;
+                }
+                if (failure_reason)
+                    *failure_reason = "enabled output mode could not be parsed";
+                g_free(contents);
+                return FALSE;
+            }
+            continue;
+        }
+
+        if (g_strcmp0(key, "mode") == 0) {
+            g_clear_pointer(&current_mode, g_free);
+            current_mode = trimmed_toml_string_value(line);
+        }
+
+        if (current_output_enabled && current_mode) {
+            saw_enabled_output = TRUE;
+            if (parse_shikane_mode_dimensions(current_mode, logical_width, logical_height)) {
+                g_free(contents);
+                return TRUE;
+            }
+            if (failure_reason)
+                *failure_reason = "enabled output mode could not be parsed";
+            g_free(contents);
+            return FALSE;
+        }
+    }
+
+    g_free(contents);
+
+    if (!saw_target_profile) {
+        if (failure_reason)
+            *failure_reason = "profile was not found";
+        return FALSE;
+    }
+    if (!saw_enabled_output && !saw_enabled_output_entry) {
+        if (failure_reason)
+            *failure_reason = "profile has no enabled output with a mode";
+        return FALSE;
+    }
+
+    if (failure_reason)
+        *failure_reason = "enabled output mode could not be parsed";
+    return FALSE;
+}
+
+static void
+resolve_output_registration_size(const VividProducerConfig* config,
+                                 Producer*                  producer,
+                                 guint32                    requested_logical_width,
+                                 guint32                    requested_logical_height,
+                                 guint32                    requested_physical_width,
+                                 guint32                    requested_physical_height,
+                                 gdouble                    scale,
+                                 guint32*                   resolved_logical_width,
+                                 guint32*                   resolved_logical_height,
+                                 guint32*                   resolved_physical_width,
+                                 guint32*                   resolved_physical_height,
+                                 gboolean*                  manual_mode)
+{
+    if (manual_mode)
+        *manual_mode = FALSE;
+
+    const gboolean use_manual =
+        config != NULL &&
+        config->output_size_mode == 1 &&
+        config->output_width > 0 &&
+        config->output_height > 0;
+
+    const gboolean use_shikane =
+        config != NULL &&
+        config->output_size_mode == 2;
+
+    if (manual_mode)
+        *manual_mode = use_manual;
+
+    if (!use_manual && !use_shikane) {
+        producer_clear_output_size_warning(producer);
+        *resolved_logical_width = requested_logical_width;
+        *resolved_logical_height = requested_logical_height;
+        *resolved_physical_width = requested_physical_width > 0
+            ? requested_physical_width
+            : round_scaled_output_dimension(requested_logical_width, scale);
+        *resolved_physical_height = requested_physical_height > 0
+            ? requested_physical_height
+            : round_scaled_output_dimension(requested_logical_height, scale);
+        return;
+    }
+
+    if (use_shikane) {
+        guint32 shikane_width = 0;
+        guint32 shikane_height = 0;
+        const gchar* reason = NULL;
+        if (producer &&
+            resolve_shikane_profile_output_size(config->output_shikane_profile,
+                                                &shikane_width,
+                                                &shikane_height,
+                                                &reason)) {
+            producer_clear_output_size_warning(producer);
+            *resolved_logical_width = shikane_width;
+            *resolved_logical_height = shikane_height;
+            *resolved_physical_width = shikane_width;
+            *resolved_physical_height = shikane_height;
+            return;
+        }
+
+        if (producer) {
+            g_autofree gchar* warning_key =
+                g_strdup_printf("shikane:%s:%s",
+                                config->output_shikane_profile ? config->output_shikane_profile : "",
+                                reason ? reason : "unknown");
+            g_autofree gchar* warning_message =
+                g_strdup_printf("VividProducer: output-size-mode shikane fallback to auto for profile \"%s\": %s",
+                                config->output_shikane_profile ? config->output_shikane_profile : "",
+                                reason ? reason : "unknown reason");
+            producer_log_output_size_warning(producer, warning_key, warning_message);
+        }
+
+        *resolved_logical_width = requested_logical_width;
+        *resolved_logical_height = requested_logical_height;
+        *resolved_physical_width = requested_physical_width > 0
+            ? requested_physical_width
+            : round_scaled_output_dimension(requested_logical_width, scale);
+        *resolved_physical_height = requested_physical_height > 0
+            ? requested_physical_height
+            : round_scaled_output_dimension(requested_logical_height, scale);
+        return;
+    }
+
+    producer_clear_output_size_warning(producer);
+    *resolved_logical_width = (guint32)config->output_width;
+    *resolved_logical_height = (guint32)config->output_height;
+    *resolved_physical_width = round_scaled_output_dimension(*resolved_logical_width, scale);
+    *resolved_physical_height = round_scaled_output_dimension(*resolved_logical_height, scale);
 }
 
 static void
@@ -3720,16 +4178,21 @@ send_frame_ready_event(Client* client,
 static void
 output_init_rebind_candidate(const Output* current, Output* candidate)
 {
+    guint32 logical_width = 0;
+    guint32 logical_height = 0;
+    guint32 physical_width = 0;
+    guint32 physical_height = 0;
+
     memset(candidate, 0, sizeof(*candidate));
     output_init_plane_fds(candidate);
     candidate->client = current->client;
     candidate->consumer_output_id = current->consumer_output_id;
     candidate->monitor_index = current->monitor_index;
     candidate->output_id = current->output_id;
-    candidate->logical_width = current->logical_width;
-    candidate->logical_height = current->logical_height;
-    candidate->width = current->width;
-    candidate->height = current->height;
+    candidate->requested_logical_width = current->requested_logical_width;
+    candidate->requested_logical_height = current->requested_logical_height;
+    candidate->requested_physical_width = current->requested_physical_width;
+    candidate->requested_physical_height = current->requested_physical_height;
     candidate->scale = current->scale;
     candidate->refresh_rate_mhz = current->refresh_rate_mhz;
     candidate->generation = current->generation + 1;
@@ -3738,6 +4201,23 @@ output_init_rebind_candidate(const Output* current, Output* candidate)
     memcpy(candidate->producer_blacklist,
            current->producer_blacklist,
            sizeof(candidate->producer_blacklist));
+
+    resolve_output_registration_size(&current->client->producer->config,
+                                     current->client->producer,
+                                     candidate->requested_logical_width,
+                                     candidate->requested_logical_height,
+                                     candidate->requested_physical_width,
+                                     candidate->requested_physical_height,
+                                     candidate->scale,
+                                     &logical_width,
+                                     &logical_height,
+                                     &physical_width,
+                                     &physical_height,
+                                     NULL);
+    candidate->logical_width = CLAMP(logical_width, 1u, OUTPUT_MAX_DIMENSION);
+    candidate->logical_height = CLAMP(logical_height, 1u, OUTPUT_MAX_DIMENSION);
+    candidate->width = CLAMP(physical_width, 1u, OUTPUT_MAX_DIMENSION);
+    candidate->height = CLAMP(physical_height, 1u, OUTPUT_MAX_DIMENSION);
 }
 
 static gboolean
@@ -4615,22 +5095,36 @@ handle_register_output(Client* client, const guint8* body, gsize body_len)
         json_object_get_uint_default(object, "monitorIndex", 0);
     const guint32 consumer_output_id =
         json_object_get_uint_default(object, "consumerOutputId", monitor_index);
-    const guint32 width =
+    const guint32 requested_width =
         json_object_get_uint_default(object, "width", 1280);
-    const guint32 height =
+    const guint32 requested_height =
         json_object_get_uint_default(object, "height", 720);
     const gdouble scale =
         MAX(1.0, json_object_get_double_default(object, "scale", 1.0));
-    guint32 physical_width =
+    const guint32 requested_physical_width =
         json_object_get_uint_default(object, "physicalWidth", 0);
-    guint32 physical_height =
+    const guint32 requested_physical_height =
         json_object_get_uint_default(object, "physicalHeight", 0);
-    if (physical_width == 0)
-        physical_width = (guint32)MAX(1.0, floor((gdouble)width * scale + 0.5));
-    if (physical_height == 0)
-        physical_height = (guint32)MAX(1.0, floor((gdouble)height * scale + 0.5));
     const guint32 refresh_rate_mhz =
         json_object_get_uint_default(object, "refreshRateMhz", 0);
+    guint32 logical_width = 0;
+    guint32 logical_height = 0;
+    guint32 physical_width = 0;
+    guint32 physical_height = 0;
+    gboolean manual_output_size = FALSE;
+
+    resolve_output_registration_size(&client->producer->config,
+                                     client->producer,
+                                     requested_width,
+                                     requested_height,
+                                     requested_physical_width,
+                                     requested_physical_height,
+                                     scale,
+                                     &logical_width,
+                                     &logical_height,
+                                     &physical_width,
+                                     &physical_height,
+                                     &manual_output_size);
 
     if (!client->dmabuf_caps.present) {
         g_warning("VividProducer: refusing REGISTER_OUTPUT before dmabufCaps.version=3");
@@ -4644,8 +5138,12 @@ handle_register_output(Client* client, const guint8* body, gsize body_len)
     Output* output = output_new(client,
                                 consumer_output_id,
                                 monitor_index,
-                                width,
-                                height,
+                                requested_width,
+                                requested_height,
+                                requested_physical_width,
+                                requested_physical_height,
+                                logical_width,
+                                logical_height,
                                 physical_width,
                                 physical_height,
                                 scale,
@@ -4666,10 +5164,16 @@ handle_register_output(Client* client, const guint8* body, gsize body_len)
     g_ptr_array_add(client->outputs, output);
 
     g_message("VividProducer: registered monitor=%u consumer-output=%u output=%u "
-              "logical=%ux%u physical=%ux%u scale=%.3f refresh=%u",
+              "mode=%s requested-logical=%ux%u requested-physical=%ux%u "
+              "effective-logical=%ux%u effective-physical=%ux%u scale=%.3f refresh=%u",
               monitor_index,
               consumer_output_id,
               output->output_id,
+              client->producer->config.output_size_mode == 2 ? "shikane" : (manual_output_size ? "manual" : "auto"),
+              requested_width,
+              requested_height,
+              requested_physical_width,
+              requested_physical_height,
               output->logical_width,
               output->logical_height,
               output->width,
@@ -4695,6 +5199,11 @@ handle_pointer_event(Client* client, guint16 opcode, const guint8* body, gsize b
 {
     if (opcode == VIVID_DISPLAY_REQ_POINTER_MOTION &&
         body_len == VIVID_DISPLAY_POINTER_MOTION_BODY_BYTES) {
+        vivid_pointer_debug_log_motion("VividProducer:",
+                                       read_u32_le(&body[0]),
+                                       read_f64_le(&body[4]),
+                                       read_f64_le(&body[12]),
+                                       read_u64_le(&body[20]));
         vivid_producer_renderer_pointer_motion(client->producer->renderer,
                                                 read_f64_le(&body[4]),
                                                 read_f64_le(&body[12]));
@@ -5282,6 +5791,7 @@ main(int argc, char** argv)
         g_printerr("VividProducer: %s\n", error->message);
         g_clear_error(&error);
         g_option_context_free(context);
+        g_free(producer.last_output_size_warning);
         g_ptr_array_unref(producer.clients);
         g_mutex_clear(&producer.release_lock);
         g_free(producer.socket_path);
@@ -5309,6 +5819,7 @@ main(int argc, char** argv)
     if (!producer_open_dmabuf_allocator(&producer)) {
         vivid_producer_renderer_free(producer.renderer);
         g_main_loop_unref(producer.loop);
+        g_free(producer.last_output_size_warning);
         g_ptr_array_unref(producer.clients);
         g_mutex_clear(&producer.release_lock);
         vivid_producer_config_clear(&producer.config);
@@ -5320,6 +5831,7 @@ main(int argc, char** argv)
         producer_close_dmabuf_allocator(&producer);
         vivid_producer_renderer_free(producer.renderer);
         g_main_loop_unref(producer.loop);
+        g_free(producer.last_output_size_warning);
         g_ptr_array_unref(producer.clients);
         g_mutex_clear(&producer.release_lock);
         vivid_producer_config_clear(&producer.config);
@@ -5341,6 +5853,7 @@ main(int argc, char** argv)
         producer_close_dmabuf_allocator(&producer);
         vivid_producer_renderer_free(producer.renderer);
         g_main_loop_unref(producer.loop);
+        g_free(producer.last_output_size_warning);
         g_ptr_array_unref(producer.clients);
         g_mutex_clear(&producer.release_lock);
         vivid_producer_config_clear(&producer.config);
@@ -5350,15 +5863,18 @@ main(int argc, char** argv)
 
     g_unix_signal_add(SIGINT, quit_on_signal, &producer);
     g_unix_signal_add(SIGTERM, quit_on_signal, &producer);
+    producer.fd_debug_source_id = vivid_fd_debug_start("VividProducer:");
 
     g_main_loop_run(producer.loop);
 
+    vivid_fd_debug_stop(&producer.fd_debug_source_id);
     vivid_producer_renderer_set_release_gate(producer.renderer, NULL);
     producer_stop(&producer);
     producer_release_coordinator_stop(&producer);
     producer_close_dmabuf_allocator(&producer);
     vivid_producer_renderer_free(producer.renderer);
     g_main_loop_unref(producer.loop);
+    g_free(producer.last_output_size_warning);
     g_ptr_array_unref(producer.clients);
     g_mutex_clear(&producer.release_lock);
     vivid_producer_config_clear(&producer.config);

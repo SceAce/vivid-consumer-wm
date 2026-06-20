@@ -13,6 +13,7 @@ const OutputModel = imports.outputModel;
 const LayerShellSurfaces = imports.layerShellSurfaces;
 const DisplayConnection = imports.displayConnection;
 const RuntimeTopology = imports.runtimeTopology;
+const FdDebug = imports.fdDebug;
 
 const LAYER_SHELL_REQUIRED = @layer_shell_required@;
 const DISPLAY_CONSUMER_DIR = GLib.getenv('VIVID_DISPLAY_CONSUMER_DIR') || '';
@@ -26,7 +27,7 @@ Options:
   --socket PATH                  Vivid producer socket path.
   --compositor MODE              Compositor mode: ${RuntimeArgs.SUPPORTED_COMPOSITORS.join(', ')}.
   --no-input                     Do not advertise input features.
-  --enable-pointer-events        Unsupported; pointer forwarding is not implemented.
+  --enable-pointer-events        Forward Hyprland pointer motion without taking input focus.
 
 Normal run connects to the Vivid display-v1 producer socket and presents frames.`);
 }
@@ -234,6 +235,9 @@ function runLayerShellConsumer(options) {
 
     const dmabufCaps = buildDmaBufCaps(DisplayConsumer, Gdk);
     print(`Prepared DMA-BUF caps: ${JSON.stringify(dmabufCaps)}`);
+    if (options.requiresHyprlandPlugin) {
+        printerr('Vivid Wayland Consumer: --enable-pointer-events requires the vivid Hyprland plugin; internal Hyprland cursor polling is disabled.');
+    }
 
     const display = Gdk.Display.get_default();
     const topology = new RuntimeTopology.TopologyController({
@@ -284,14 +288,19 @@ function runLayerShellConsumer(options) {
         DisplayConsumer,
         log: message => printerr(`Vivid Wayland Consumer: ${message}`),
     });
+    const fdDebugMonitor = new FdDebug.FdDebugMonitor({
+        log: message => printerr(`Vivid Wayland Consumer: ${message}`),
+    });
     displayConnection.start();
     topology.watch(displayConnection);
+    fdDebugMonitor.start();
 
     const loop = new GLib.MainLoop(null, false);
     if (options.exitAfterMs !== undefined) {
         GLib.timeout_add(GLib.PRIORITY_DEFAULT, options.exitAfterMs, () => {
             topology.stop();
             displayConnection.stop();
+            fdDebugMonitor.stop();
             loop.quit();
             return GLib.SOURCE_REMOVE;
         });
@@ -300,6 +309,7 @@ function runLayerShellConsumer(options) {
     loop.run();
     topology.stop();
     displayConnection.stop();
+    fdDebugMonitor.stop();
     return 0;
 }
 

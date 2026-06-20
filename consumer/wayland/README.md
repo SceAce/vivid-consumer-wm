@@ -58,12 +58,20 @@ tools/vivid.sh wayland run --help
 tools/vivid.sh wayland run --probe
 tools/vivid.sh wayland run --compositor hyprland
 tools/vivid.sh wayland run --compositor niri
+tools/vivid.sh wayland run --compositor hyprland --enable-pointer-events
 ```
 
 Normal runs connect to `${XDG_RUNTIME_DIR}/vivid/display-v1.sock` by default.
 Use `--socket PATH` to point at another producer socket. `--compositor auto` is
 the default, with explicit `generic`, `hyprland`, and `niri` modes available for
 manual compositor verification.
+
+The Wayland consumer no longer performs internal Hyprland cursor polling or
+pointer forwarding. Wallpaper windows remain input-transparent. On Hyprland,
+pointer motion forwarding requires the Vivid Hyprland plugin to be installed and
+loaded separately. `--enable-pointer-events` is accepted as a compatibility hint:
+when Hyprland is selected or auto-detected, the consumer prints a warning that
+the plugin is required instead of enabling any Wayland-side polling path.
 
 The launcher automatically uses `consumer/gnome/.build/src/display_consumer` for
 the shared display consumer library when it exists. If that library lives
@@ -86,8 +94,10 @@ checkout or any path that is not a `.build` directory or below one.
 
 ## Current Limitations
 
-- Pointer forwarding is not implemented. Wallpaper surfaces always set an empty
-  input region and do not consume input; `--enable-pointer-events` is rejected.
+- Wayland-side pointer forwarding is disabled. Wallpaper surfaces always set an
+  empty input region and do not consume input. Hyprland pointer motion requires
+  the Vivid Hyprland plugin; `--enable-pointer-events` only reports that plugin
+  requirement for compatibility with older launch flows.
 - Media controls are not exposed by this consumer yet.
 - Audio capture, audio forwarding, and audio-reactive integration are not
   enabled in the Wayland consumer yet.

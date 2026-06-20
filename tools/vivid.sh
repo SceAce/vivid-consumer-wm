@@ -8,9 +8,10 @@ REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 usage() {
     cat <<'EOF'
 Usage:
-  tools/vivid.sh build {direct-run|gnome|kde|wayland|flatpak|all}
-  tools/vivid.sh clean {direct-run|gnome|kde|wayland|flatpak|producer|consumer|all}
+  tools/vivid.sh build {direct-run|gnome|kde|wayland|hyprland-plugin|flatpak|all}
+  tools/vivid.sh clean {direct-run|gnome|kde|wayland|hyprland-plugin|flatpak|producer|consumer|all}
   tools/vivid.sh completion bash
+  tools/vivid.sh systemd-user {install|start|stop|restart|status|logs}
 
   tools/vivid.sh direct-run {build|clean}
   tools/vivid.sh direct-run run
@@ -20,6 +21,7 @@ Usage:
   tools/vivid.sh gnome {build|clean|install|zip|enable|disable|reset|uninstall|log}
   tools/vivid.sh kde {build|clean|install|zip|uninstall|log}
   tools/vivid.sh wayland {build|clean|run}
+  tools/vivid.sh hyprland-plugin {build|test|install|clean}
 
   tools/vivid.sh flatpak prefetch
   tools/vivid.sh flatpak {build|clean}
@@ -29,6 +31,7 @@ Aliases:
   tools/vivid.sh consumer gnome ...
   tools/vivid.sh consumer kde ...
   tools/vivid.sh consumer wayland ...
+  tools/vivid.sh consumer hyprland-plugin ...
   tools/vivid.sh producer build-direct-run
   tools/vivid.sh producer run-direct-run
   tools/vivid.sh producer prefetch
@@ -50,15 +53,17 @@ _vivid_sh_completion() {
     cur="${COMP_WORDS[COMP_CWORD]}"
     COMPREPLY=()
 
-    local top_commands="build clean direct-run gnome consumer-gnome kde consumer-kde wayland consumer-wayland consumer flatpak producer completion help -h --help"
-    local build_targets="direct-run producer gnome consumer-gnome kde consumer-kde wayland consumer-wayland flatpak all"
-    local clean_targets="direct-run gnome consumer-gnome kde consumer-kde wayland consumer-wayland flatpak producer consumer all"
+    local top_commands="build clean direct-run gnome consumer-gnome kde consumer-kde wayland consumer-wayland hyprland-plugin consumer-hyprland-plugin consumer flatpak producer systemd-user completion help -h --help"
+    local build_targets="direct-run producer gnome consumer-gnome kde consumer-kde wayland consumer-wayland hyprland-plugin consumer-hyprland-plugin flatpak all"
+    local clean_targets="direct-run gnome consumer-gnome kde consumer-kde wayland consumer-wayland hyprland-plugin consumer-hyprland-plugin flatpak producer consumer all"
     local direct_run_actions="build clean run run-producer run-webui"
     local gnome_actions="build clean install zip enable disable reset uninstall log"
     local kde_actions="build clean install zip uninstall log"
     local wayland_actions="build clean run"
+    local hyprland_plugin_actions="build test install clean"
     local flatpak_actions="prefetch build clean run-appdir"
     local producer_actions="build-direct-run run-direct-run run-direct-run-producer run-direct-run-webui prefetch build-flatpak run-flatpak-appdir clean-direct-run clean-flatpak clean"
+    local systemd_user_actions="install start stop restart status logs"
 
     _vivid_complete_words() {
         COMPREPLY=( $(compgen -W "$1" -- "${cur}") )
@@ -104,9 +109,14 @@ _vivid_sh_completion() {
                 _vivid_complete_words "${wayland_actions}"
             fi
             ;;
+        hyprland-plugin|consumer-hyprland-plugin)
+            if [[ "${COMP_CWORD}" -eq 2 ]]; then
+                _vivid_complete_words "${hyprland_plugin_actions}"
+            fi
+            ;;
         consumer)
             if [[ "${COMP_CWORD}" -eq 2 ]]; then
-                _vivid_complete_words "gnome kde wayland"
+                _vivid_complete_words "gnome kde wayland hyprland-plugin"
             elif [[ "${COMP_CWORD}" -eq 3 ]]; then
                 case "${COMP_WORDS[2]}" in
                     gnome)
@@ -117,6 +127,9 @@ _vivid_sh_completion() {
                         ;;
                     wayland)
                         _vivid_complete_words "${wayland_actions}"
+                        ;;
+                    hyprland-plugin)
+                        _vivid_complete_words "${hyprland_plugin_actions}"
                         ;;
                 esac
             fi
@@ -131,6 +144,13 @@ _vivid_sh_completion() {
                 _vivid_complete_words "${producer_actions}"
             elif [[ "${COMP_WORDS[2]}" == "run-direct-run-producer" || "${COMP_WORDS[2]}" == "run-direct-run-webui" ]]; then
                 COMPREPLY=( $(compgen -f -- "${cur}") )
+            fi
+            ;;
+        systemd-user)
+            if [[ "${COMP_CWORD}" -eq 2 ]]; then
+                _vivid_complete_words "${systemd_user_actions}"
+            elif [[ "${COMP_CWORD}" -eq 3 ]]; then
+                _vivid_complete_words "--dry-run"
             fi
             ;;
         completion)
@@ -211,6 +231,16 @@ clean_wayland_consumer() {
     clean_path "Wayland consumer build cache" "${VIVID_WAYLAND_BUILD_ROOT}"
 }
 
+clean_hyprland_plugin_consumer() {
+    local root_dir
+    root_dir="$(cd "${SCRIPT_DIR}/../consumer/hyprland-plugin" && pwd)"
+
+    ROOT_DIR="${root_dir}"
+    . "${SCRIPT_DIR}/consumer_hyprland_plugin/build_env.sh"
+
+    clean_path "Hyprland plugin consumer build cache" "${VIVID_HYPRLAND_PLUGIN_BUILD_ROOT}"
+}
+
 clean_direct_run() {
     local root_dir
     root_dir="$(cd "${SCRIPT_DIR}/../producer" && pwd)"
@@ -268,6 +298,9 @@ run_clean() {
         wayland|consumer-wayland)
             clean_wayland_consumer
             ;;
+        hyprland-plugin|consumer-hyprland-plugin)
+            clean_hyprland_plugin_consumer
+            ;;
         flatpak)
             clean_flatpak
             ;;
@@ -278,12 +311,14 @@ run_clean() {
             clean_gnome_consumer
             clean_kde_consumer
             clean_wayland_consumer
+            clean_hyprland_plugin_consumer
             ;;
         all)
             clean_producer
             clean_gnome_consumer
             clean_kde_consumer
             clean_wayland_consumer
+            clean_hyprland_plugin_consumer
             ;;
         *)
             die_usage "unknown clean target: ${target}"
@@ -385,6 +420,9 @@ run_build_group() {
         wayland|consumer-wayland)
             run_wayland build "$@"
             ;;
+        hyprland-plugin|consumer-hyprland-plugin)
+            run_hyprland_plugin build "$@"
+            ;;
         flatpak)
             run_flatpak build "$@"
             ;;
@@ -393,6 +431,7 @@ run_build_group() {
             build_gnome_consumer
             run_kde build
             run_wayland build
+            run_hyprland_plugin build
             ;;
         *)
             die_usage "unknown build target: ${target}"
@@ -436,6 +475,24 @@ run_wayland() {
     "${SCRIPT_DIR}/consumer_wayland/run.sh" "$@"
 }
 
+run_hyprland_plugin() {
+    local action="${1:-}"
+    if [[ -z "${action}" ]]; then
+        die_usage "missing Hyprland plugin consumer action"
+    fi
+
+    if [[ "${action}" = "clean" ]]; then
+        shift
+        if [[ $# -ne 0 ]]; then
+            die_usage "unexpected Hyprland plugin clean arguments: $*"
+        fi
+        clean_hyprland_plugin_consumer
+        return
+    fi
+
+    "${SCRIPT_DIR}/consumer_hyprland_plugin/run.sh" "$@"
+}
+
 run_flatpak() {
     local action="${1:-}"
     if [[ -z "${action}" ]]; then
@@ -463,6 +520,14 @@ run_flatpak() {
             die_usage "unknown Flatpak action: ${action}"
             ;;
     esac
+}
+
+run_systemd_user() {
+    if [[ $# -eq 0 ]]; then
+        die_usage "missing systemd-user action"
+    fi
+
+    bash "${SCRIPT_DIR}/systemd_user/install.sh" "$@"
 }
 
 run_producer_alias() {
@@ -537,6 +602,10 @@ case "${1:-help}" in
         shift
         run_wayland "$@"
         ;;
+    hyprland-plugin|consumer-hyprland-plugin)
+        shift
+        run_hyprland_plugin "$@"
+        ;;
     consumer)
         shift
         target="${1:-}"
@@ -554,6 +623,9 @@ case "${1:-help}" in
             wayland)
                 run_wayland "$@"
                 ;;
+            hyprland-plugin)
+                run_hyprland_plugin "$@"
+                ;;
             *)
                 die_usage "unknown consumer target: ${target}"
                 ;;
@@ -566,6 +638,10 @@ case "${1:-help}" in
     producer)
         shift
         run_producer_alias "$@"
+        ;;
+    systemd-user)
+        shift
+        run_systemd_user "$@"
         ;;
     completion)
         shift

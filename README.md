@@ -81,6 +81,95 @@ layer-shell compositor, the shared display consumer library, and a running Vivid
 producer. See `consumer/wayland/README.md` for details, limitations, and manual
 Hyprland/niri verification steps.
 
+### Hyprland Pointer Bridge
+
+Hyprland needs an extra plugin because the wallpaper layer-shell surfaces stay
+input-transparent. The Wayland consumer still renders the wallpaper, but the
+Hyprland plugin passively forwards pointer motion to the producer so Vivid can
+drive pointer-reactive wallpapers without making the wallpaper windows accept
+input.
+
+Build, test, and install the plugin with:
+
+```sh
+bash tools/vivid.sh hyprland-plugin test
+bash tools/vivid.sh hyprland-plugin install
+```
+
+Install keeps a stable library path for fresh Hyprland sessions and also prints
+a unique reload copy for in-session reloads, which avoids same-path `dlopen`
+cache reuse when loading updated plugin code.
+
+Load the plugin before starting the Hyprland Wayland consumer. For fresh
+Hyprland sessions, use the stable load command:
+
+```sh
+hyprctl plugin load "$HOME/.local/lib/vivid/hyprland/libvivid-hyprland-bridge.so"
+```
+
+Or load it from Hyprland config so it is present on login:
+
+```ini
+plugin = /home/source/.local/lib/vivid/hyprland/libvivid-hyprland-bridge.so
+```
+
+For in-session development reloads, use the unique reload copy printed by the
+install command instead of reusing the stable path.
+
+Run the producer and Wayland consumer separately:
+
+```sh
+VIVID_POINTER_DEBUG=1 bash tools/vivid.sh direct-run run-producer
+VIVID_POINTER_DEBUG=1 bash tools/vivid.sh wayland run --compositor hyprland
+```
+
+For user-systemd autostart of the producer, Web UI, and Hyprland Wayland
+consumer, install the user units:
+
+```sh
+bash tools/vivid.sh systemd-user install
+```
+
+Then start the target from Hyprland so the Wayland session environment is
+available:
+
+```ini
+exec-once = systemctl --user start vivid-hyprland.target
+```
+
+The systemd user flow does not load the Hyprland plugin. Keep the plugin in
+Hyprland config with:
+
+```ini
+plugin = /home/source/.local/lib/vivid/hyprland/libvivid-hyprland-bridge.so
+```
+
+The installed user units set `VIVID_POINTER_DEBUG=1` for the producer and
+Hyprland Wayland consumer, plus `VIVID_WEBUI_HOST=127.0.0.1` and
+`VIVID_WEBUI_PORT=8765` for the Web UI. Override those in the unit files under
+`~/.config/systemd/user` if you want quieter defaults or a different bind
+address/port.
+
+Verify plugin startup in:
+
+```sh
+cat "$XDG_RUNTIME_DIR/vivid/hyprland-plugin.log"
+```
+
+Expect the startup log to include `hash_ok=1 listener_registered=1`. With
+pointer debug enabled and motion flowing, the log can also show
+`mouse.move.enter`, `mouse.move.route`, and socket activity.
+
+For the full install flow, config keys, and reload details, see
+`consumer/hyprland-plugin/README.md`.
+
+niri uses the Wayland consumer path directly and does not need the Hyprland
+plugin:
+
+```sh
+VIVID_POINTER_DEBUG=1 bash tools/vivid.sh wayland run --compositor niri
+```
+
 ### Clean
 
 ```sh

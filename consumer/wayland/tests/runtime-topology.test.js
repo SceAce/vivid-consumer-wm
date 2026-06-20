@@ -183,8 +183,45 @@ function testMonitorItemsChangedToEmptyClearsSurfacesAndProducerTopology() {
     ], 'empty topology clears producer outputs');
 }
 
+function testMonitorItemsChangedNotifiesPresenterCallback() {
+    const calls = [];
+    const display = makeDisplay([{id: 'DP-1'}]);
+    const controller = new RuntimeTopology.TopologyController({
+        display,
+        compositor: 'generic',
+        createSurfaces: makeSurfaceFactory(calls),
+        destroySurfaces: surfaces => {
+            calls.push(['destroySurfaces', surfaces.map(surface => surface.monitor.id)]);
+        },
+        createPresenter: makePresenterFactory(calls),
+        outputFromMonitor,
+        onPresentersChanged: presenters => {
+            calls.push(['presentersChanged', presenters.map(presenter => presenter.output.outputId)]);
+        },
+        log: message => calls.push(['log', message]),
+    });
+    controller.buildInitial();
+    calls.length = 0;
+    controller.watch({
+        rebuildTopology(presenters) {
+            calls.push(['rebuildConnection', presenters.map(presenter => presenter.output.outputId)]);
+        },
+    });
+
+    display.monitorList.replace([{id: 'DP-2'}]);
+
+    assertDeepEqual(calls, [
+        ['destroySurfaces', ['DP-1']],
+        ['createSurface', 'DP-2'],
+        ['createPresenter', 'DP-2'],
+        ['rebuildConnection', ['DP-2']],
+        ['presentersChanged', ['DP-2']],
+    ], 'topology rebuild presenter callback');
+}
+
 [
     testInitialBuildCreatesSurfacesAndPresenters,
     testMonitorItemsChangedDestroysSurfacesAndReconnectsWithNewPresenters,
     testMonitorItemsChangedToEmptyClearsSurfacesAndProducerTopology,
+    testMonitorItemsChangedNotifiesPresenterCallback,
 ].forEach(testCase => testCase());

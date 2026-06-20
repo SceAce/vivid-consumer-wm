@@ -44,7 +44,7 @@ function testHelloIdentifiesWaylandConsumer() {
     ], 'hello base features');
 }
 
-function testHelloNeverAdvertisesPointerFeatureUntilForwardingExists() {
+function testHelloNeverAdvertisesPointerFeature() {
     const disabledPayload = ProtocolPayloads.buildHelloPayload({
         pointerEventsEnabled: false,
     });
@@ -71,7 +71,7 @@ function testConsumerCapsExcludeProtocolFeaturesAndMediaAudio() {
     assertEqual(payload.audioSamples, undefined, 'audio samples field');
 }
 
-function testPointerCapabilityAlwaysFalseUntilForwardingExists() {
+function testPointerCapabilityIsAlwaysDisabled() {
     const disabledPayload = ProtocolPayloads.buildConsumerCapsPayload({
         pointerEventsEnabled: false,
     });
@@ -121,9 +121,9 @@ function testOutputRegistrationUsesSameFeaturePolicy() {
 
 [
     testHelloIdentifiesWaylandConsumer,
-    testHelloNeverAdvertisesPointerFeatureUntilForwardingExists,
+    testHelloNeverAdvertisesPointerFeature,
     testConsumerCapsExcludeProtocolFeaturesAndMediaAudio,
-    testPointerCapabilityAlwaysFalseUntilForwardingExists,
+    testPointerCapabilityIsAlwaysDisabled,
     testConsumerCapsExposeFutureProducerFieldsWithoutFakeDmabufCaps,
     testOutputRegistrationUsesSameFeaturePolicy,
 ].forEach(testCase => testCase());

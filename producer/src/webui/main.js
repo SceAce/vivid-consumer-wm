@@ -126,6 +126,11 @@ const TRANSLATIONS = {
     'setting.debug-mode.name': 'Debug Mode',
     'setting.low-battery-threshold.name': 'Low Battery Threshold',
     'setting.mute.name': 'Mute Audio',
+    'setting.output-height.name': 'Output Height',
+    'setting.output-shikane-profile.name': 'Shikane Profile',
+    'setting.output-shikane-profile.note': 'Reads a profile from ~/.config/shikane/config.toml',
+    'setting.output-size-mode.name': 'Output Size Mode',
+    'setting.output-width.name': 'Output Width',
     'setting.pause-on-battery.name': 'Pause on Battery',
     'setting.pause-on-focus.name': 'Pause when Desktop Loses Focus',
     'setting.pause-on-maximize-or-fullscreen.name': 'Pause on Maximize or Fullscreen',
@@ -139,6 +144,9 @@ const TRANSLATIONS = {
     'setting.stop-on-applications.name': 'Stop on Applications',
     'setting.stop-on-applications.note': 'Desktop IDs, WM_CLASS values, or executable names',
     'setting.volume.name': 'Volume Level',
+    'settingOption.output-size-mode.0': 'Auto',
+    'settingOption.output-size-mode.1': 'Manual',
+    'settingOption.output-size-mode.2': 'Shikane Profile',
     'settingOption.change-wallpaper-mode.0': 'Sequential',
     'settingOption.change-wallpaper-mode.1': 'Inverse Sequential',
     'settingOption.change-wallpaper-mode.2': 'Random',
@@ -239,6 +247,11 @@ const TRANSLATIONS = {
     'setting.debug-mode.name': '调试模式',
     'setting.low-battery-threshold.name': '低电量阈值',
     'setting.mute.name': '静音',
+    'setting.output-height.name': '输出高度',
+    'setting.output-shikane-profile.name': 'Shikane 配置档名称',
+    'setting.output-shikane-profile.note': '读取 ~/.config/shikane/config.toml 中的 profile 名称',
+    'setting.output-size-mode.name': '输出尺寸模式',
+    'setting.output-width.name': '输出宽度',
     'setting.pause-on-battery.name': '电池供电时暂停',
     'setting.pause-on-focus.name': '桌面失焦时暂停',
     'setting.pause-on-maximize-or-fullscreen.name': '最大化或全屏时暂停',
@@ -252,6 +265,9 @@ const TRANSLATIONS = {
     'setting.stop-on-applications.name': '遇到应用时停止',
     'setting.stop-on-applications.note': '桌面 ID、WM_CLASS 或可执行文件名',
     'setting.volume.name': '音量',
+    'settingOption.output-size-mode.0': '自动',
+    'settingOption.output-size-mode.1': '手动',
+    'settingOption.output-size-mode.2': 'Shikane 配置档',
     'settingOption.change-wallpaper-mode.0': '顺序',
     'settingOption.change-wallpaper-mode.1': '反向顺序',
     'settingOption.change-wallpaper-mode.2': '随机',
@@ -494,6 +510,46 @@ const SETTINGS = [
       ['3', 'Scale down'],
     ],
   },
+  {
+    section: 'general',
+    key: 'output-size-mode',
+    name: 'Output Size Mode',
+    type: 'select',
+    valueType: 'integer',
+    options: [
+      ['0', 'Auto'],
+      ['1', 'Manual'],
+      ['2', 'Shikane Profile'],
+    ],
+  },
+  {
+    section: 'general',
+    key: 'output-shikane-profile',
+    name: 'Shikane Profile',
+    note: 'Reads a profile from ~/.config/shikane/config.toml',
+    type: 'select',
+    dynamicOptions: shikaneProfileOptions,
+  },
+  {
+    section: 'general',
+    key: 'output-width',
+    name: 'Output Width',
+    type: 'number',
+    min: 64,
+    max: 16384,
+    step: 1,
+    debounce: 250,
+  },
+  {
+    section: 'general',
+    key: 'output-height',
+    name: 'Output Height',
+    type: 'number',
+    min: 64,
+    max: 16384,
+    step: 1,
+    debounce: 250,
+  },
   {section: 'general', key: 'mute', name: 'Mute Audio', type: 'boolean'},
   {section: 'general', key: 'volume', name: 'Volume Level', type: 'range', min: 0, max: 100, step: 1},
   {section: 'general', key: 'show-panel-menu', name: 'Show Panel Menu', type: 'boolean'},
@@ -705,6 +761,12 @@ function gpuDeviceOptions() {
     options.push([node, `${node} : ${name}`]);
   }
   return options;
+}
+
+function shikaneProfileOptions() {
+  return (app.state?.['shikane-profiles'] ?? [])
+    .filter(profile => typeof profile === 'string' && profile.length > 0)
+    .map(profile => [profile, profile]);
 }
 
 function settingName(definition) {

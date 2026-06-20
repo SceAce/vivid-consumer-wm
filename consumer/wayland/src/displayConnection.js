@@ -8,12 +8,14 @@ var FRAME_HEADER_BYTES = 4;
 var FRAME_READY_BODY_BYTES = 36;
 var FRAME_READY_FD_COUNT = 2;
 var UNBIND_BODY_BYTES = 12;
+var POINTER_MOTION_BODY_BYTES = 28;
 var RECONNECT_DELAY_MS = 1000;
 var FRAME_SYNC_WAIT_TIMEOUT_MSEC = 1000;
 
 var REQ_HELLO = 1;
 var REQ_REGISTER_OUTPUT = 2;
 var REQ_CONSUMER_CAPS = 4;
+var REQ_POINTER_MOTION = 7;
 var REQ_BIND_FAILED = 14;
 var REQ_UNBIND_DONE = 15;
 
@@ -81,6 +83,11 @@ function writeUint64LE(bytes, offset, value) {
     const normalized = Math.max(0, Math.floor(Number(value) || 0));
     writeUint32LE(bytes, offset, normalized >>> 0);
     writeUint32LE(bytes, offset + 4, Math.floor(normalized / 0x100000000) >>> 0);
+}
+
+function writeFloat64LE(bytes, offset, value) {
+    const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+    view.setFloat64(offset, Number(value), true);
 }
 
 function encodeFrame(opcode, body = new Uint8Array(0)) {
@@ -166,6 +173,15 @@ function unbindBodyFromPayload(payload = {}) {
     return body;
 }
 
+function pointerMotionBodyFromPayload(payload = {}) {
+    const body = new Uint8Array(POINTER_MOTION_BODY_BYTES);
+    writeUint32LE(body, 0, Number(payload.outputId ?? 0));
+    writeFloat64LE(body, 4, Number(payload.x ?? 0));
+    writeFloat64LE(body, 12, Number(payload.y ?? 0));
+    writeUint64LE(body, 20, Number(payload.timeUsec ?? 0));
+    return body;
+}
+
 function bytesFromGBytes(bytes) {
     const data = bytes.get_data();
     return data instanceof Uint8Array ? data : new Uint8Array(data);
@@ -204,6 +220,20 @@ function closeFrameFdList(DisplayConsumer, fdList) {
     const length = fdList?.get_length?.() ?? 0;
     for (let index = 0; index < length; index += 1) {
         closeDisplayConsumerFd(DisplayConsumer, takeFrameFd(fdList, index));
+    }
+}
+
+function releaseFdList(DisplayConsumer, fdList) {
+    if (!fdList || typeof fdList.steal_fds !== 'function') {
+        return;
+    }
+
+    try {
+        for (const fd of fdList.steal_fds()) {
+            closeDisplayConsumerFd(DisplayConsumer, fd);
+        }
+    } catch (error) {
+        printerr(`Vivid Wayland Consumer: fd-list release failed: ${error}`);
     }
 }
 
@@ -262,6 +292,42 @@ function numberOrDefault(value, defaultValue) {
     return Number.isFinite(number) ? number : defaultValue;
 }
 
+function defaultOutputMapPath() {
+    const runtimeDir = GLib.getenv('XDG_RUNTIME_DIR') || '/tmp';
+    return GLib.build_filenamev([runtimeDir, 'vivid', 'outputs.json']);
+}
+
+var OutputMapFileWriter = class OutputMapFileWriter {
+    constructor(options = {}) {
+        this._path = options.path || defaultOutputMapPath();
+        this._log = options.log || (message => printerr(`Vivid Wayland Consumer: ${message}`));
+        this._loggedFailure = false;
+    }
+
+    write(outputs) {
+        try {
+            const directory = GLib.path_get_dirname(this._path);
+            GLib.mkdir_with_parents(directory, 0o700);
+            const payload = JSON.stringify({
+                version: 1,
+                outputs,
+            });
+            const tempPath = `${this._path}.tmp-${GLib.get_monotonic_time()}`;
+            GLib.file_set_contents(tempPath, payload);
+            const renameResult = GLib.rename(tempPath, this._path);
+            if (renameResult !== 0) {
+                throw new Error(`rename failed with code ${renameResult}`);
+            }
+            this._loggedFailure = false;
+        } catch (error) {
+            if (!this._loggedFailure) {
+                this._log(`failed to write Hyprland output map ${this._path}: ${error.message ?? error}`);
+                this._loggedFailure = true;
+            }
+        }
+    }
+};
+
 function payloadForOutput(output, options = {}) {
     if (typeof output.outputPayload === 'function') {
         return output.outputPayload();
@@ -284,6 +350,8 @@ var DisplayConnectionState = class DisplayConnectionState {
             compositor: options.compositor || 'auto',
             renderer: options.renderer,
             dmabufCaps: options.dmabufCaps,
+            outputMapWriter: options.outputMapWriter ||
+                new OutputMapFileWriter({path: options.outputMapPath, log: options.log}),
         };
         this._queuedFrames = [];
         this._outputs = [];
@@ -292,6 +360,7 @@ var DisplayConnectionState = class DisplayConnectionState {
         this.rebuildTopology(options.outputs || [], {
             connected: false,
             clearExisting: false,
+            writeOutputMap: false,
         });
     }
 
@@ -318,9 +387,11 @@ var DisplayConnectionState = class DisplayConnectionState {
 
     onSocketClosed() {
         this._clearImportedOutputState();
+        this._writeOutputMap();
     }
 
     rebuildTopology(outputs, options = {}) {
+        const shouldWriteOutputMap = options.writeOutputMap !== false;
         if (options.clearExisting !== false) {
             this._clearImportedOutputState();
         }
@@ -330,6 +401,9 @@ var DisplayConnectionState = class DisplayConnectionState {
         this._outputsByBackendId = new Map();
         for (const output of outputs) {
             this._outputsByConsumerId.set(Number(output.consumerOutputId ?? output.monitorIndex ?? 0), output);
+        }
+        if (shouldWriteOutputMap) {
+            this._writeOutputMap();
         }
     }
 
@@ -394,6 +468,39 @@ var DisplayConnectionState = class DisplayConnectionState {
         });
     }
 
+    queuePointerMotion(output, x, y, timeUsec) {
+        if (!this._options.pointerEventsEnabled) {
+            return false;
+        }
+
+        if (output?.backendOutputId === null || output?.backendOutputId === undefined) {
+            return false;
+        }
+
+        const backendOutputId = Number(output.backendOutputId);
+        if (!Number.isFinite(backendOutputId)) {
+            return false;
+        }
+
+        const scale = numberOrDefault(output.scale, 1) > 0
+            ? numberOrDefault(output.scale, 1)
+            : 1;
+        const payload = {
+            outputId: backendOutputId,
+            x: Number(x) * scale,
+            y: Number(y) * scale,
+            timeUsec,
+        };
+        const bytes = encodeFrame(REQ_POINTER_MOTION, pointerMotionBodyFromPayload(payload));
+        this._queueFrame({
+            opcode: REQ_POINTER_MOTION,
+            payload,
+            bytes,
+            coalesceKey: `pointer-motion:${backendOutputId}`,
+        });
+        return true;
+    }
+
     takeQueuedFrames() {
         const frames = this._queuedFrames;
         this._queuedFrames = [];
@@ -401,11 +508,24 @@ var DisplayConnectionState = class DisplayConnectionState {
     }
 
     _queue(opcode, payload) {
-        this._queuedFrames.push({
+        this._queueFrame({
             opcode,
             payload,
             bytes: encodeJsonFrame(opcode, payload),
         });
+    }
+
+    _queueFrame(frame) {
+        if (frame.coalesceKey !== undefined) {
+            const existingIndex = this._queuedFrames.findIndex(queued =>
+                queued.coalesceKey === frame.coalesceKey);
+            if (existingIndex !== -1) {
+                this._queuedFrames[existingIndex] = frame;
+                return;
+            }
+        }
+
+        this._queuedFrames.push(frame);
     }
 
     _clearImportedOutputState() {
@@ -428,7 +548,27 @@ var DisplayConnectionState = class DisplayConnectionState {
 
         output.backendOutputId = backendOutputId;
         this._outputsByBackendId.set(backendOutputId, output);
+        this._writeOutputMap();
         return true;
+    }
+
+    _writeOutputMap() {
+        const outputs = [];
+        for (const output of this._outputs) {
+            const backendOutputId = Number(output.backendOutputId);
+            if (!Number.isFinite(backendOutputId) || backendOutputId <= 0) {
+                continue;
+            }
+            const monitorName = String(output.outputId ?? output.monitorName ?? '');
+            if (monitorName === '') {
+                continue;
+            }
+            outputs.push({
+                monitorName,
+                outputId: backendOutputId,
+            });
+        }
+        this._options.outputMapWriter?.write(outputs);
     }
 
     _outputForBackendId(outputId) {
@@ -756,6 +896,14 @@ var DisplaySocketClient = class DisplaySocketClient {
         }
     }
 
+    queuePointerMotion(output, x, y, timeUsec) {
+        const queued = this._state.queuePointerMotion(output, x, y, timeUsec);
+        if (queued) {
+            this._drainStateQueue();
+        }
+        return queued;
+    }
+
     _connect() {
         this._clearReconnect();
         this._socketClient = new Gio.SocketClient();
@@ -784,6 +932,7 @@ var DisplaySocketClient = class DisplaySocketClient {
         this._receiver = this._DisplayConsumer.Receiver.new(this._connection);
         this._receiverSignalIds = [
             this._receiver.connect('frame', (_receiver, opcode, body, fdList) => {
+                const shouldReleaseFdList = opcode === EVT_FRAME_READY || opcode === EVT_BIND_BUFFERS;
                 try {
                     const handled = this._state.handleDecodedFrame(opcode, bytesFromGBytes(body), fdList);
                     if (!handled && (opcode === EVT_FRAME_READY || opcode === EVT_BIND_BUFFERS)) {
@@ -794,6 +943,10 @@ var DisplaySocketClient = class DisplaySocketClient {
                     this._log(`failed to handle frame opcode=${opcode}: ${error}`);
                     if (opcode === EVT_FRAME_READY || opcode === EVT_BIND_BUFFERS) {
                         closeFrameFdList(this._DisplayConsumer, fdList);
+                    }
+                } finally {
+                    if (shouldReleaseFdList) {
+                        releaseFdList(this._DisplayConsumer, fdList);
                     }
                 }
             }),
@@ -814,9 +967,24 @@ var DisplaySocketClient = class DisplaySocketClient {
 
     _drainStateQueue() {
         for (const frame of this._state.takeQueuedFrames()) {
-            this._writeQueue.push(frame.bytes);
+            this._enqueueWriteFrame(frame);
         }
         this._flushWriteQueue();
+    }
+
+    _enqueueWriteFrame(frame) {
+        if (frame.coalesceKey !== undefined) {
+            const searchStart = this._writePending ? 1 : 0;
+            const existingIndex = this._writeQueue.findIndex((queued, index) =>
+                index >= searchStart &&
+                queued.coalesceKey === frame.coalesceKey);
+            if (existingIndex !== -1) {
+                this._writeQueue[existingIndex] = frame;
+                return;
+            }
+        }
+
+        this._writeQueue.push(frame);
     }
 
     _flushWriteQueue() {
@@ -824,7 +992,8 @@ var DisplaySocketClient = class DisplaySocketClient {
             return;
         }
 
-        const bytes = this._writeQueue[0];
+        const frame = this._writeQueue[0];
+        const bytes = frame.bytes;
         this._writePending = true;
         this._output.write_all_async(bytes, GLib.PRIORITY_DEFAULT, this._cancellable, (stream, result) => {
             if (stream !== this._output) {
@@ -904,6 +1073,7 @@ var DisplayConnection = {
     REQ_HELLO,
     REQ_REGISTER_OUTPUT,
     REQ_CONSUMER_CAPS,
+    REQ_POINTER_MOTION,
     REQ_BIND_FAILED,
     REQ_UNBIND_DONE,
     EVT_WELCOME,
@@ -923,6 +1093,8 @@ var DisplayConnection = {
     decodeUnbindBody,
     frameReadyBodyFromPayload,
     unbindBodyFromPayload,
+    pointerMotionBodyFromPayload,
+    OutputMapFileWriter,
     WaylandOutputPresenter,
     DisplaySocketClient,
 };

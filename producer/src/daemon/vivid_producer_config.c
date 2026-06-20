@@ -151,6 +151,10 @@ vivid_producer_config_reset_defaults(VividProducerConfig* config)
     config->debug_mode = FALSE;
     replace_string(&config->render_device, "auto");
     config->content_fit = 1;
+    config->output_size_mode = 0;
+    config->output_width = 1920;
+    config->output_height = 1080;
+    replace_string(&config->output_shikane_profile, "");
     config->scene_fps = 30;
     config->startup_delay = 1000;
     config->show_panel_menu = TRUE;
@@ -317,6 +321,7 @@ vivid_producer_config_clear(VividProducerConfig* config)
     g_free(config->user_properties);
     g_free(config->change_wallpaper_directory_path);
     g_free(config->render_device);
+    g_free(config->output_shikane_profile);
     g_free(config->project_browser_filter_state);
     g_free(config->project_browser_sort_key);
     g_clear_pointer(&config->stop_on_applications, g_ptr_array_unref);
@@ -381,6 +386,13 @@ vivid_producer_config_load(VividProducerConfig* config)
      */
     load_string_member(global, "render-device", &config->render_device);
     config->content_fit = json_get_int_clamped(global, "content-fit", config->content_fit, 0, 3);
+    config->output_size_mode =
+        json_get_int_clamped(global, "output-size-mode", config->output_size_mode, 0, 2);
+    config->output_width =
+        json_get_int_clamped(global, "output-width", config->output_width, 64, 16384);
+    config->output_height =
+        json_get_int_clamped(global, "output-height", config->output_height, 64, 16384);
+    load_string_member(global, "output-shikane-profile", &config->output_shikane_profile);
     config->scene_fps = json_get_int_clamped(global, "scene-fps", config->scene_fps, 5, 240);
     config->startup_delay = json_get_int_clamped(global, "startup-delay", config->startup_delay, 0, 10000);
     config->show_panel_menu = json_get_boolean(global, "show-panel-menu", config->show_panel_menu);
@@ -436,6 +448,10 @@ builder_add_config_global(JsonBuilder* builder, const VividProducerConfig* confi
     ADD_BOOL("debug-mode", config->debug_mode);
     ADD_STRING("render-device", config->render_device);
     ADD_INT("content-fit", config->content_fit);
+    ADD_INT("output-size-mode", config->output_size_mode);
+    ADD_INT("output-width", config->output_width);
+    ADD_INT("output-height", config->output_height);
+    ADD_STRING("output-shikane-profile", config->output_shikane_profile);
     ADD_INT("scene-fps", config->scene_fps);
     ADD_INT("startup-delay", config->startup_delay);
     ADD_BOOL("show-panel-menu", config->show_panel_menu);
@@ -641,6 +657,13 @@ vivid_producer_config_apply_control(VividProducerConfig* config,
         config->debug_mode = json_get_boolean(payload, "debug-mode", config->debug_mode);
         load_string_member(payload, "render-device", &config->render_device);
         config->content_fit = json_get_int_clamped(payload, "content-fit", config->content_fit, 0, 3);
+        config->output_size_mode =
+            json_get_int_clamped(payload, "output-size-mode", config->output_size_mode, 0, 2);
+        config->output_width =
+            json_get_int_clamped(payload, "output-width", config->output_width, 64, 16384);
+        config->output_height =
+            json_get_int_clamped(payload, "output-height", config->output_height, 64, 16384);
+        load_string_member(payload, "output-shikane-profile", &config->output_shikane_profile);
         config->scene_fps = json_get_int_clamped(payload, "scene-fps", config->scene_fps, 5, 240);
         config->startup_delay = json_get_int_clamped(payload, "startup-delay", config->startup_delay, 0, 10000);
         config->show_panel_menu = json_get_boolean(payload, "show-panel-menu", config->show_panel_menu);

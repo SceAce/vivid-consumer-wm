@@ -1,0 +1,4 @@
+[Unit]
+Description=Vivid Hyprland runtime
+Wants=vivid-producer.service vivid-webui.service vivid-wayland-hyprland.service
+After=graphical-session.target

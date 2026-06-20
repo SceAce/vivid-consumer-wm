@@ -1,0 +1,15 @@
+[Unit]
+Description=Vivid Wayland consumer for Hyprland
+After=graphical-session.target vivid-producer.service
+PartOf=vivid-hyprland.target
+
+[Service]
+Type=simple
+WorkingDirectory=@REPO_ROOT@
+Environment=VIVID_POINTER_DEBUG=1
+ExecStart=/usr/bin/env bash @REPO_ROOT@/tools/vivid.sh wayland run --compositor hyprland
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=vivid-hyprland.target

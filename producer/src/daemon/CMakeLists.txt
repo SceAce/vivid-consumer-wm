@@ -22,6 +22,8 @@ pkg_check_modules(GSTREAMER_CUDA REQUIRED gstreamer-cuda-1.0)
 set(VIVID_PRODUCER_DAEMON_SOURCES
   vivid_producer.c
   vivid_producer_config.c
+  vivid_fd_debug.c
+  vivid_pointer_debug.c
   vivid_dmabuf_negotiation.c
   vivid_unbind_ack_tracker.c
   vivid_producer_renderer.c
@@ -134,4 +136,28 @@ if(BUILD_TESTING)
   target_compile_options(vivid_unbind_ack_tracker_test PRIVATE ${GLIB_CFLAGS_OTHER})
   target_link_libraries(vivid_unbind_ack_tracker_test PRIVATE ${GLIB_LIBRARIES})
   add_test(NAME vivid_unbind_ack_tracker COMMAND vivid_unbind_ack_tracker_test)
+
+  add_executable(vivid_fd_debug_test
+    tests/vivid_fd_debug_test.c
+    vivid_fd_debug.c
+  )
+  target_include_directories(vivid_fd_debug_test PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}
+    ${GLIB_INCLUDE_DIRS}
+  )
+  target_compile_options(vivid_fd_debug_test PRIVATE ${GLIB_CFLAGS_OTHER})
+  target_link_libraries(vivid_fd_debug_test PRIVATE ${GLIB_LIBRARIES})
+  add_test(NAME vivid_fd_debug COMMAND vivid_fd_debug_test)
+
+  add_executable(vivid_pointer_debug_test
+    tests/vivid_pointer_debug_test.c
+    vivid_pointer_debug.c
+  )
+  target_include_directories(vivid_pointer_debug_test PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}
+    ${GLIB_INCLUDE_DIRS}
+  )
+  target_compile_options(vivid_pointer_debug_test PRIVATE ${GLIB_CFLAGS_OTHER})
+  target_link_libraries(vivid_pointer_debug_test PRIVATE ${GLIB_LIBRARIES})
+  add_test(NAME vivid_pointer_debug COMMAND vivid_pointer_debug_test)
 endif()

@@ -1,0 +1,15 @@
+[Unit]
+Description=Vivid producer
+After=graphical-session.target
+PartOf=vivid-hyprland.target
+
+[Service]
+Type=simple
+WorkingDirectory=@REPO_ROOT@
+Environment=VIVID_POINTER_DEBUG=1
+ExecStart=/usr/bin/env bash @REPO_ROOT@/tools/vivid.sh direct-run run-producer
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=vivid-hyprland.target
